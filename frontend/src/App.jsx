@@ -8,6 +8,7 @@ import Contact from './Pages/Contact/Contact';
 import Package from './Pages/CardDeatil.jsx/Package';
 import Trending from './Pages/Trending/Trending';
 import CustomizedPackage from './Pages/CustomizedPackage/CustomizedPackage';
+import Success from './Pages/AfterPayments/PaymentSuccess';
 
 export const BACKEND_URL = import.meta.env.VITE_BACKEND_URL;
 
@@ -22,7 +23,8 @@ const App = () => {
         <Route path='/contact' element={<Contact/>}/>
         <Route path='/package/:name' element={<Package/>}/>
         <Route path='/trending/:name' element={<Trending/>}/>
-        <Route path='/cutompage' element={<CustomizedPackage/>}/>
+        <Route path='/custompage' element={<CustomizedPackage/>}/>
+        <Route path='/success' element={<Success/>}/>
       </Routes>
       <Footer/>
     </div>
