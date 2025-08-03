@@ -7,6 +7,7 @@ import includerouter from './router/includeRouter.js';
 import trendrouter from './router/trendingRouter.js';
 import loginrouter from './controller/logincontroller.js';
 import gallryRouter from './router/GalleryRouter.js';
+import paymentRoutes from './router/PaymentRouter.js';
 
 
 const app = express();
@@ -23,7 +24,7 @@ app.use('/api/include', includerouter);
 app.use('/api/trending',trendrouter);
 app.use('/api/admin',loginrouter);
 app.use('/api/gallery',gallryRouter);
-
+app.use('/api/payments', paymentRoutes);
 
 app.get('/', (req, res) => {
   res.send("API working");

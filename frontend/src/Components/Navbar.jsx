@@ -62,7 +62,7 @@ const Header = () => {
 
         <div className="hidden md:flex items-end gap-6">
           <button 
-          onClick={()=>navigate('/cutompage')}
+          onClick={()=>navigate('/custompage')}
           className="py-2 px-4 bg-green-600 rounded-xl hover:bg-green-800 text-sm text-white outfit-regular cursor-pointer">
             Customize Packages
           </button>
