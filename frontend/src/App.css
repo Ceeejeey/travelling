@@ -1,0 +1,11 @@
+.fade-in {
+  opacity: 0;
+  animation: fadeInAnimation 1s forwards;
+  animation-delay: var(--delay);
+}
+
+@keyframes fadeInAnimation {
+  to {
+    opacity: 1;
+  }
+}
