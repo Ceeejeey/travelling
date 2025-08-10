@@ -1,213 +1,209 @@
 import express from 'express';
-const router = express.Router();
-import Stripe from 'stripe';
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 import paypal from '@paypal/checkout-server-sdk';
+import crypto from 'crypto';
 
-// Middleware to validate environment variables
-if (!process.env.STRIPE_SECRET_KEY) {
-  console.error('Stripe secret key is not set in environment variables.');
-  process.exit(1);
-}
-if (!process.env.PAYPAL_CLIENT_ID || !process.env.PAYPAL_CLIENT_SECRET) {
-  console.error('PayPal client ID or secret is not set in environment variables.');
-  process.exit(1);
-}
+const router = express.Router();
 
-// Configure PayPal SDK
-const paypalEnv = process.env.NODE_ENV === 'production'
-  ? new paypal.core.LiveEnvironment(process.env.PAYPAL_CLIENT_ID, process.env.PAYPAL_CLIENT_SECRET)
-  : new paypal.core.SandboxEnvironment(process.env.PAYPAL_CLIENT_ID, process.env.PAYPAL_CLIENT_SECRET);
-const paypalClient = new paypal.core.PayPalHttpClient(paypalEnv);
+// PayPal configuration
+const paypalClient = new paypal.core.PayPalHttpClient(
+  new paypal.core.SandboxEnvironment(
+    process.env.PAYPAL_CLIENT_ID,
+    process.env.PAYPAL_CLIENT_SECRET
+  )
+);
 
-// POST endpoint for Stripe checkout session
-router.post('/create-checkout-session/stripe', async (req, res) => {
+router.post('/initiate/payhere', async (req, res) => {
   try {
-    const { tripName, amount, quantity, successUrl, cancelUrl } = req.body;
+    const {
+      merchant_id,
+      order_id,
+      amount,
+      currency,
+      items,
+      return_url,
+      cancel_url,
+      notify_url,
+      first_name,
+      last_name,
+      email,
+      phone,
+      address,
+      city,
+      country
+    } = req.body;
 
-    // Input validation
-    if (!tripName || !amount || !quantity || !successUrl || !cancelUrl) {
+    // Validate required fields
+    if (
+      !merchant_id || !order_id || !amount || !currency || !items ||
+      !return_url || !cancel_url || !notify_url || !first_name || !email
+    ) {
       return res.status(400).json({
         success: false,
-        error: 'Missing required fields: tripName, amount, quantity, successUrl, cancelUrl'
+        error: 'Missing required fields'
       });
     }
 
-    // Validate amount and quantity
-    if (!Number.isInteger(amount) || amount <= 0) {
-      return res.status(400).json({
+    // Ensure amount has exactly two decimal places
+    const formattedAmount = parseFloat(amount).toFixed(2);
+
+    // Get merchant secret from env
+    const merchantSecret = process.env.PAYHERE_MERCHANT_SECRET;
+    if (!merchantSecret) {
+      return res.status(500).json({
         success: false,
-        error: 'Invalid amount: must be a positive integer in cents'
-      });
-    }
-    if (!Number.isInteger(quantity) || quantity <= 0) {
-      return res.status(400).json({
-        success: false,
-        error: 'Invalid quantity: must be a positive integer'
+        error: 'PayHere merchant secret not configured'
       });
     }
 
-    // Create Stripe checkout session
-    const session = await stripe.checkout.sessions.create({
-      payment_method_types: ['card'],
-      line_items: [
-        {
-          price_data: {
-            currency: 'usd',
-            product_data: {
-              name: tripName,
-              description: `Booking for ${tripName}`,
-            },
-            unit_amount: amount, // Amount in cents
-          },
-          quantity: quantity,
-        },
-      ],
-      mode: 'payment',
-      success_url: successUrl,
-      cancel_url: cancelUrl,
-      metadata: {
-        tripName,
-        bookingType: 'travel'
-      }
+    // Step 1: MD5 hash the merchant secret and uppercase it
+    const hashedSecret = crypto.createHash('md5').update(merchantSecret).digest('hex').toUpperCase();
+
+    // Step 2: Create the full hash string
+    const hashString = merchant_id + order_id + formattedAmount + currency + hashedSecret;
+
+    // Step 3: MD5 hash the final string and uppercase it
+    const hash = crypto.createHash('md5').update(hashString).digest('hex').toUpperCase();
+
+    console.log('PayHere payment initiated:', {
+      order_id,
+      amount: formattedAmount,
+      currency,
+      items
     });
 
     res.status(200).json({
       success: true,
-      sessionId: session.id,
-      sessionUrl: session.url
+      status: 'initiated',
+      hash
     });
   } catch (error) {
-    console.error('Error creating Stripe checkout session:', error.message);
+    console.error('Error initiating PayHere payment:', error.message);
     res.status(500).json({
       success: false,
-      error: 'Failed to create Stripe checkout session',
+      error: 'Failed to initiate PayHere payment',
       details: error.message
     });
   }
 });
 
-// POST endpoint for PayPal payment creation
+// POST endpoint for PayHere notification
+router.post('/notify/payhere', async (req, res) => {
+
+  console.log('PayHere notification received:', req.body);
+  try {
+    const {
+      merchant_id,
+      order_id,
+      payment_id,
+      payhere_amount,
+      payhere_currency,
+      status_code,
+      md5sig
+    } = req.body;
+
+    // Input validation
+    if (!merchant_id || !order_id || !payment_id || !payhere_amount || !payhere_currency || !status_code || !md5sig) {
+      console.error('Missing required fields in PayHere notification:', req.body);
+      return res.status(400).json({ success: false, error: 'Missing required fields' });
+    }
+
+    // Verify MD5 signature
+    const merchantSecret = process.env.PAYHERE_MERCHANT_SECRET;
+    if (!merchantSecret) {
+      console.error('PayHere merchant secret not configured');
+      return res.status(500).json({ success: false, error: 'Merchant secret not configured' });
+    }
+    const hashedSecret = crypto.createHash('md5').update(merchantSecret).digest('hex').toUpperCase();
+    const localSignatureInput = `${merchant_id}${order_id}${payhere_amount}${payhere_currency}${status_code}${hashedSecret}`;
+    const localSignature = crypto
+      .createHash('md5')
+      .update(localSignatureInput)
+      .digest('hex')
+      .toUpperCase();
+
+    console.log('PayHere notification received:', {
+      merchant_id,
+      order_id,
+      payment_id,
+      payhere_amount,
+      payhere_currency,
+      status_code,
+      md5sig,
+      localSignature,
+      localSignatureInput
+    });
+
+    if (localSignature !== md5sig) {
+      console.error('Invalid PayHere signature:', { order_id, payment_id, md5sig, localSignature });
+      return res.status(400).json({ success: false, error: 'Invalid signature' });
+    }
+
+    // Process payment status
+    if (status_code == 2) {
+      console.log('Payment successful:', { order_id, payment_id, payhere_amount, payhere_currency });
+      // TODO: Update your database as payment success
+      // Example: await updateOrderStatus(order_id, 'completed', payment_id, payhere_amount);
+    } else if (status_code == 0) {
+      console.log('Payment pending:', { order_id, payment_id, payhere_amount, payhere_currency });
+      // TODO: Handle pending payment
+    } else if (status_code == -1) {
+      console.log('Payment cancelled:', { order_id, payment_id, payhere_amount, payhere_currency });
+      // TODO: Handle cancelled payment
+    } else if (status_code == -2) {
+      console.log('Payment failed:', { order_id, payment_id, payhere_amount, payhere_currency });
+      // TODO: Handle failed payment
+    } else {
+      console.log('Unknown payment status:', { order_id, payment_id, status_code });
+    }
+
+    res.status(200).json({ success: true, status: 'notified' });
+  } catch (error) {
+    console.error('Error processing PayHere notification:', error.message);
+    res.status(500).json({ success: false, error: 'Failed to process notification', details: error.message });
+  }
+});
+
+// PayPal endpoints
 router.post('/create-checkout-session/paypal', async (req, res) => {
   try {
     const { tripName, amount, quantity, successUrl, cancelUrl } = req.body;
-
-    // Input validation
-    if (!tripName || !amount || !quantity || !successUrl || !cancelUrl) {
-      return res.status(400).json({
-        success: false,
-        error: 'Missing required fields: tripName, amount, quantity, successUrl, cancelUrl'
-      });
-    }
-
-    // Validate amount and quantity
-    if (typeof amount !== 'number' || amount <= 0) {
-      return res.status(400).json({
-        success: false,
-        error: 'Invalid amount: must be a positive number'
-      });
-    }
-    if (!Number.isInteger(quantity) || quantity <= 0) {
-      return res.status(400).json({
-        success: false,
-        error: 'Invalid quantity: must be a positive integer'
-      });
-    }
-
-    // Create PayPal order
     const request = new paypal.orders.OrdersCreateRequest();
-    request.prefer("return=representation");
+    request.prefer('return=representation');
     request.requestBody({
       intent: 'CAPTURE',
       purchase_units: [
         {
           amount: {
             currency_code: 'USD',
-            value: (amount * quantity / 100).toFixed(2), // Convert cents to dollars
-            breakdown: {
-              item_total: {
-                currency_code: 'USD',
-                value: (amount * quantity / 100).toFixed(2)
-              }
-            }
+            value: (amount / 100).toFixed(2),
           },
-          items: [
-            {
-              name: tripName,
-              description: `Booking for ${tripName}`,
-              quantity: quantity,
-              unit_amount: {
-                currency_code: 'USD',
-                value: (amount / 100).toFixed(2) // Amount per item in dollars
-              }
-            }
-          ]
+          description: tripName,
+          quantity: quantity
         }
       ],
       application_context: {
         return_url: successUrl,
-        cancel_url: cancelUrl,
-        brand_name: 'Your Travel Booking',
-        landing_page: 'BILLING',
-        user_action: 'PAY_NOW'
+        cancel_url: cancelUrl
       }
     });
 
-    const order = await paypalClient.execute(request);
-
-    // Find approval link
-    const approvalLink = order.result.links.find(link => link.rel === 'approve');
-
-    if (!approvalLink) {
-      throw new Error('No approval link found in PayPal response');
-    }
-
-    res.status(200).json({
-      success: true,
-      orderId: order.result.id,
-      approvalUrl: approvalLink.href
-    });
+    const response = await paypalClient.execute(request);
+    res.json({ orderId: response.result.id });
   } catch (error) {
-    console.error('Error creating PayPal order:', error.message);
-    res.status(500).json({
-      success: false,
-      error: 'Failed to create PayPal order',
-      details: error.message
-    });
+    console.error('PayPal order creation error:', error.message);
+    res.status(500).json({ error: 'Failed to create PayPal order' });
   }
 });
 
-// POST endpoint to capture PayPal payment
 router.post('/capture-paypal-payment', async (req, res) => {
   try {
     const { orderId } = req.body;
-
-    if (!orderId) {
-      return res.status(400).json({
-        success: false,
-        error: 'Missing orderId'
-      });
-    }
-
     const request = new paypal.orders.OrdersCaptureRequest(orderId);
-    const capture = await paypalClient.execute(request);
-
-    if (capture.result.status === 'COMPLETED') {
-      res.status(200).json({
-        success: true,
-        captureId: capture.result.id,
-        status: capture.result.status
-      });
-    } else {
-      throw new Error('Payment capture failed');
-    }
+    const response = await paypalClient.execute(request);
+    res.json({ success: true, status: response.result.status });
   } catch (error) {
-    console.error('Error capturing PayPal payment:', error.message);
-    res.status(500).json({
-      success: false,
-      error: 'Failed to capture PayPal payment',
-      details: error.message
-    });
+    console.error('PayPal capture error:', error.message);
+    res.status(500).json({ error: 'Failed to capture PayPal payment' });
   }
 });
 
