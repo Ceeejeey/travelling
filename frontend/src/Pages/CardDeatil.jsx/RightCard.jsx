@@ -1,11 +1,11 @@
-import React, { useState, useContext, useEffect, Component } from 'react';
+import React, { useState, useContext, useEffect, useCallback } from 'react';
 import axios from 'axios';
 import { PayPalScriptProvider, PayPalButtons } from '@paypal/react-paypal-js';
 import { TravelContext } from '../../Context/TravelContext';
 import { toast } from 'react-toastify';
 
 // Error Boundary Component
-class ErrorBoundary extends Component {
+class ErrorBoundary extends React.Component {
   state = { hasError: false, errorMessage: '' };
 
   static getDerivedStateFromError(error) {
@@ -30,6 +30,7 @@ const RightCard = ({ item }) => {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState(null);
   const [showPayPal, setShowPayPal] = useState(false);
+  const [isPayPalDisabled, setIsPayPalDisabled] = useState(false);
   const [formData, setFormData] = useState({
     first_name: '',
     last_name: '',
@@ -46,23 +47,28 @@ const RightCard = ({ item }) => {
   const [showForm, setShowForm] = useState(true);
   const [csrfToken, setCsrfToken] = useState('');
 
-  // Fetch CSRF token
+  // Fetch CSRF token only if not already set
+  const fetchCsrfToken = useCallback(async () => {
+    if (csrfToken) {
+      console.log('CSRF token already set:', csrfToken);
+      return;
+    }
+    try {
+      const response = await axios.get(`${import.meta.env.VITE_BACKEND_URL}/api/payments/csrf-token`, {
+        withCredentials: true,
+      });
+      setCsrfToken(response.data.csrfToken);
+      console.log('CSRF token fetched:', response.data.csrfToken);
+    } catch (err) {
+      console.error('Failed to fetch CSRF token:', err.message);
+      setError('Failed to initialize payment system. Please try again.');
+      toast.error('Payment system initialization failed');
+    }
+  }, [csrfToken]);
+
   useEffect(() => {
-    const fetchCsrfToken = async () => {
-      try {
-        const response = await axios.get(`${import.meta.env.VITE_BACKEND_URL}/api/payments/csrf-token`, {
-          withCredentials: true,
-        });
-        setCsrfToken(response.data.csrfToken);
-        console.log('CSRF token fetched:', response.data.csrfToken);
-      } catch (err) {
-        console.error('Failed to fetch CSRF token:', err.message);
-        setError('Failed to initialize payment system. Please try again.');
-        toast.error('Payment system initialization failed');
-      }
-    };
     fetchCsrfToken();
-  }, []);
+  }, [fetchCsrfToken]);
 
   // Load PayHere SDK
   useEffect(() => {
@@ -162,6 +168,7 @@ const RightCard = ({ item }) => {
     }
     setShowForm(false);
     setError(null);
+    setIsPayPalDisabled(false); // Reset PayPal button state
   };
 
   // Handle back to form
@@ -169,6 +176,8 @@ const RightCard = ({ item }) => {
     setShowForm(true);
     setShowPayPal(false);
     setError(null);
+    setIsPayPalDisabled(false); // Reset PayPal button state
+    setCsrfToken(''); // Force new CSRF token fetch
   };
 
   const handlePayHerePayment = async () => {
@@ -205,7 +214,7 @@ const RightCard = ({ item }) => {
       order_id: `ORDER_${Date.now()}`,
       items: item.name || item.duration,
       amount: item.price.toFixed(2),
-      currency: 'LKR',
+      currency: 'USD',
       first_name: formData.first_name,
       last_name: formData.last_name,
       email: formData.email,
@@ -252,12 +261,14 @@ const RightCard = ({ item }) => {
   const handlePayPalClick = () => {
     setShowPayPal(true);
     setError(null);
+    setIsPayPalDisabled(true); // Disable PayPal button
   };
 
   const createPayPalOrder = async () => {
     if (!csrfToken) {
       setError('CSRF token not loaded. Please refresh and try again.');
       toast.error('CSRF token not loaded');
+      setIsPayPalDisabled(false);
       return;
     }
 
@@ -266,6 +277,7 @@ const RightCard = ({ item }) => {
       setIsLoading(false);
       setShowPayPal(false);
       setShowForm(true);
+      setIsPayPalDisabled(false);
       toast.error('Invalid package data');
       return;
     }
@@ -291,6 +303,7 @@ const RightCard = ({ item }) => {
     };
 
     try {
+      console.log('Creating new PayPal order:', bookingData);
       const response = await axios.post(
         `${import.meta.env.VITE_BACKEND_URL}/api/payments/create-checkout-session/paypal`,
         bookingData,
@@ -299,13 +312,15 @@ const RightCard = ({ item }) => {
           withCredentials: true,
         }
       );
+      console.log('PayPal order created:', response.data.orderId);
       return response.data.orderId;
     } catch (err) {
       setError('Failed to initiate PayPal payment. Please try again.');
-      console.error('PayPal order creation error:', err);
+      console.error('PayPal order creation error:', err.response?.data || err.message);
       setIsLoading(false);
       setShowPayPal(false);
       setShowForm(true);
+      setIsPayPalDisabled(false);
       toast.error('PayPal payment initiation failed');
       throw err;
     }
@@ -315,14 +330,14 @@ const RightCard = ({ item }) => {
     if (!csrfToken) {
       setError('CSRF token not loaded. Please refresh and try again.');
       toast.error('CSRF token not loaded');
+      setIsPayPalDisabled(false);
       return;
     }
 
     try {
-      const details = await actions.order.capture();
-      setIsLoading(false);
-      setShowPayPal(false);
-      await axios.post(
+      console.log('Approving PayPal order:', data.orderID);
+      setIsLoading(true);
+      const response = await axios.post(
         `${import.meta.env.VITE_BACKEND_URL}/api/payments/capture-paypal-payment`,
         {
           orderId: data.orderID,
@@ -341,15 +356,26 @@ const RightCard = ({ item }) => {
           withCredentials: true,
         }
       );
+      if (!response.data.success) {
+        throw new Error(response.data.error || 'Failed to capture PayPal payment');
+      }
+      setIsLoading(false);
+      setShowPayPal(false);
       toast.success('PayPal payment completed successfully');
       navigate('/success');
     } catch (err) {
-      setError('Failed to capture PayPal payment. Please try again.');
-      console.error('PayPal capture error:', err);
       setIsLoading(false);
       setShowPayPal(false);
       setShowForm(true);
-      toast.error('PayPal payment failed');
+      setIsPayPalDisabled(false);
+      if (err.response?.data?.error === 'Order already captured') {
+        setError('This payment has already been processed. Please start a new payment.');
+        toast.error('Payment already processed. Please try a new payment.');
+      } else {
+        setError('Failed to capture PayPal payment. Please try again.');
+        toast.error('PayPal payment failed: ' + err.message);
+      }
+      console.error('PayPal capture error:', err.response?.data || err.message);
     }
   };
 
@@ -358,6 +384,7 @@ const RightCard = ({ item }) => {
     setIsLoading(false);
     setShowPayPal(false);
     setShowForm(true);
+    setIsPayPalDisabled(false);
     setError('PayPal payment was cancelled.');
     toast.info('PayPal payment cancelled');
   };
@@ -536,9 +563,9 @@ const RightCard = ({ item }) => {
               </button>
               <button
                 onClick={handlePayPalClick}
-                disabled={isLoading || !csrfToken}
+                disabled={isLoading || !csrfToken || isPayPalDisabled}
                 className={`bg-blue-600 text-white px-6 py-2 rounded-full transition text-sm font-semibold ${
-                  isLoading || !csrfToken ? 'opacity-50 cursor-not-allowed' : 'hover:bg-blue-700'
+                  isLoading || !csrfToken || isPayPalDisabled ? 'opacity-50 cursor-not-allowed' : 'hover:bg-blue-700'
                 }`}
               >
                 {isLoading && showPayPal ? 'Processing...' : 'Pay with PayPal'}
@@ -562,6 +589,7 @@ const RightCard = ({ item }) => {
                       setIsLoading(false);
                       setShowPayPal(false);
                       setShowForm(true);
+                      setIsPayPalDisabled(false);
                       toast.error('PayPal payment failed');
                     }}
                     onCancel={onPayPalCancel}
