@@ -20,13 +20,13 @@ const paypalClient = new paypal.core.PayPalHttpClient(
 // Payment schema
 const PaymentSchema = new mongoose.Schema({
   paymentType: { type: String, required: true, enum: ['PayHere', 'PayPal'] },
-  merchant_id: { type: String }, // PayHere
-  order_id: { type: String, required: true },
-  payment_id: { type: String }, // PayHere
+  merchant_id: { type: String },
+  order_id: { type: String, required: true, unique: true },
+  payment_id: { type: String },
   amount: { type: Number, required: true },
   currency: { type: String, required: true },
   status: { type: String, required: true },
-  md5sig: { type: String }, // PayHere
+  md5sig: { type: String },
   customer: {
     first_name: { type: String },
     last_name: { type: String },
@@ -44,15 +44,13 @@ const PaymentSchema = new mongoose.Schema({
 
 const Payment = mongoose.model('Payment', PaymentSchema);
 
-// Cookie parser for CSRF
+// Cookie parser and CSRF
 router.use(cookieParser());
-
-// CSRF protection with cookies
 const csrfProtection = csurf({ cookie: { httpOnly: true, secure: process.env.NODE_ENV === 'production' } });
 
 // Rate limiting
 const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
+  windowMs: 15 * 60 * 1000,
   max: 100,
 });
 router.use(limiter);
@@ -68,7 +66,9 @@ const sanitize = (input) => {
 
 // CSRF token endpoint
 router.get('/csrf-token', csrfProtection, (req, res) => {
-  res.json({ csrfToken: req.csrfToken() });
+  const token = req.csrfToken();
+  console.log('Generated CSRF token:', token, 'Session ID:', req.sessionID);
+  res.json({ csrfToken: token });
 });
 
 router.post('/initiate/payhere', csrfProtection, async (req, res) => {
@@ -94,7 +94,6 @@ router.post('/initiate/payhere', csrfProtection, async (req, res) => {
       delivery_country,
     } = req.body;
 
-    // Validate required fields
     if (
       !merchant_id ||
       !order_id ||
@@ -107,13 +106,13 @@ router.post('/initiate/payhere', csrfProtection, async (req, res) => {
       !first_name ||
       !email
     ) {
+      console.error('Missing required fields for PayHere:', req.body);
       return res.status(400).json({
         success: false,
         error: 'Missing required fields',
       });
     }
 
-    // Sanitize inputs
     const sanitizedData = {
       merchant_id: sanitize(merchant_id),
       order_id: sanitize(order_id),
@@ -135,25 +134,18 @@ router.post('/initiate/payhere', csrfProtection, async (req, res) => {
       delivery_country: sanitize(delivery_country),
     };
 
-    // Ensure amount has exactly two decimal places
     const formattedAmount = sanitizedData.amount;
-
-    // Get merchant secret from env
     const merchantSecret = process.env.PAYHERE_MERCHANT_SECRET;
     if (!merchantSecret) {
+      console.error('PayHere merchant secret not configured');
       return res.status(500).json({
         success: false,
         error: 'PayHere merchant secret not configured',
       });
     }
 
-    // Step 1: MD5 hash the merchant secret and uppercase it
     const hashedSecret = crypto.createHash('md5').update(merchantSecret).digest('hex').toUpperCase();
-
-    // Step 2: Create the full hash string
     const hashString = sanitizedData.merchant_id + sanitizedData.order_id + formattedAmount + sanitizedData.currency + hashedSecret;
-
-    // Step 3: MD5 hash the final string and uppercase it
     const hash = crypto.createHash('md5').update(hashString).digest('hex').toUpperCase();
 
     console.log('PayHere payment initiated:', {
@@ -161,9 +153,10 @@ router.post('/initiate/payhere', csrfProtection, async (req, res) => {
       amount: formattedAmount,
       currency: sanitizedData.currency,
       items: sanitizedData.items,
+      merchant_id: sanitizedData.merchant_id,
+      notify_url: sanitizedData.notify_url,
     });
 
-    // Store customer details in custom_1 for notify endpoint
     const custom_1 = JSON.stringify({
       first_name: sanitizedData.first_name,
       last_name: sanitizedData.last_name,
@@ -193,7 +186,6 @@ router.post('/initiate/payhere', csrfProtection, async (req, res) => {
   }
 });
 
-// POST endpoint for PayHere notification (no CSRF for server-to-server)
 router.post('/notify/payhere', async (req, res) => {
   console.log('PayHere notification received:', req.body);
   try {
@@ -208,7 +200,6 @@ router.post('/notify/payhere', async (req, res) => {
       custom_1,
     } = req.body;
 
-    // Input validation
     if (
       !merchant_id ||
       !order_id ||
@@ -222,7 +213,6 @@ router.post('/notify/payhere', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Missing required fields' });
     }
 
-    // Verify MD5 signature
     const merchantSecret = process.env.PAYHERE_MERCHANT_SECRET;
     if (!merchantSecret) {
       console.error('PayHere merchant secret not configured');
@@ -253,7 +243,6 @@ router.post('/notify/payhere', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Invalid signature' });
     }
 
-    // Parse customer details from custom_1
     let customer = {};
     try {
       if (custom_1) {
@@ -275,10 +264,14 @@ router.post('/notify/payhere', async (req, res) => {
       console.error('Error parsing custom_1:', err.message);
     }
 
-    // Process payment status
     let status = '';
     if (status_code == 2) {
       status = 'success';
+      const existingPayment = await Payment.findOne({ order_id, paymentType: 'PayHere' });
+      if (existingPayment) {
+        console.log('PayHere payment already exists:', { order_id, payment_id });
+        return res.status(200).json({ success: true, status: 'already_processed' });
+      }
       const payment = new Payment({
         paymentType: 'PayHere',
         merchant_id,
@@ -313,10 +306,10 @@ router.post('/notify/payhere', async (req, res) => {
   }
 });
 
-// PayPal endpoints
 router.post('/create-checkout-session/paypal', csrfProtection, async (req, res) => {
   try {
     const { tripName, amount, quantity, successUrl, cancelUrl, customer } = req.body;
+    console.log('Creating PayPal order:', { tripName, amount, quantity, successUrl, cancelUrl });
     const request = new paypal.orders.OrdersCreateRequest();
     request.prefer('return=representation');
     request.requestBody({
@@ -334,27 +327,55 @@ router.post('/create-checkout-session/paypal', csrfProtection, async (req, res) 
       application_context: {
         return_url: successUrl,
         cancel_url: cancelUrl,
+        user_action: 'PAY_NOW', // Ensure immediate capture on approval
       },
     });
 
     const response = await paypalClient.execute(request);
+    console.log('PayPal order created:', { orderId: response.result.id, status: response.result.status });
     res.json({ orderId: response.result.id });
   } catch (error) {
-    console.error('PayPal order creation error:', error.message);
-    res.status(500).json({ error: 'Failed to create PayPal order' });
+    console.error('PayPal order creation error:', error.message, error.response?.result);
+    res.status(500).json({ error: 'Failed to create PayPal order', details: error.message });
   }
 });
 
 router.post('/capture-paypal-payment', csrfProtection, async (req, res) => {
   try {
     const { orderId, customer } = req.body;
+    console.log('Attempting to capture PayPal order:', { orderId });
+
+    // Check if payment already exists in MongoDB
+    const existingPayment = await Payment.findOne({ order_id: orderId, paymentType: 'PayPal' });
+    if (existingPayment) {
+      console.log('PayPal payment already captured in MongoDB:', { orderId, status: existingPayment.status });
+      return res.status(400).json({
+        success: false,
+        error: 'Order already captured',
+        details: 'This PayPal order has already been processed in the database.',
+      });
+    }
+
+    // Check PayPal order status
+    const orderRequest = new paypal.orders.OrdersGetRequest(orderId);
+    const orderResponse = await paypalClient.execute(orderRequest);
+    console.log('PayPal order status check:', { orderId, status: orderResponse.result.status });
+    if (orderResponse.result.status === 'COMPLETED' || orderResponse.result.status === 'APPROVED') {
+      console.log('PayPal order already captured on PayPal side:', { orderId, status: orderResponse.result.status });
+      return res.status(400).json({
+        success: false,
+        error: 'Order already captured',
+        details: 'This PayPal order has already been captured.',
+      });
+    }
+
+    // Proceed with capture
     const request = new paypal.orders.OrdersCaptureRequest(orderId);
     const response = await paypalClient.execute(request);
     const { status, purchase_units } = response.result;
     const amount = parseFloat(purchase_units[0].amount.value);
     const currency = purchase_units[0].amount.currency_code;
 
-    // Sanitize customer details
     const sanitizedCustomer = customer
       ? {
           first_name: sanitize(customer.first_name),
@@ -380,8 +401,16 @@ router.post('/capture-paypal-payment', csrfProtection, async (req, res) => {
 
     res.json({ success: true, status });
   } catch (error) {
-    console.error('PayPal capture error:', error.message);
-    res.status(500).json({ error: 'Failed to capture PayPal payment' });
+    console.error('PayPal capture error:', error.message, error.response?.result);
+    if (error.response?.result?.name === 'UNPROCESSABLE_ENTITY' && error.response.result.details?.[0]?.issue === 'ORDER_ALREADY_CAPTURED') {
+      console.log('PayPal order already captured (caught in error handler):', { orderId });
+      return res.status(400).json({
+        success: false,
+        error: 'Order already captured',
+        details: 'This PayPal order has already been captured.',
+      });
+    }
+    res.status(500).json({ success: false, error: 'Failed to capture PayPal payment', details: error.message });
   }
 });
 
