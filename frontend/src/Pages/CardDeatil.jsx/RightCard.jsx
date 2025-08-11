@@ -30,6 +30,39 @@ const RightCard = ({ item }) => {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState(null);
   const [showPayPal, setShowPayPal] = useState(false);
+  const [formData, setFormData] = useState({
+    first_name: '',
+    last_name: '',
+    email: '',
+    phone: '',
+    address: '',
+    city: '',
+    country: '',
+    delivery_address: '',
+    delivery_city: '',
+    delivery_country: '',
+  });
+  const [formErrors, setFormErrors] = useState({});
+  const [showForm, setShowForm] = useState(true);
+  const [csrfToken, setCsrfToken] = useState('');
+
+  // Fetch CSRF token
+  useEffect(() => {
+    const fetchCsrfToken = async () => {
+      try {
+        const response = await axios.get(`${import.meta.env.VITE_BACKEND_URL}/api/payments/csrf-token`, {
+          withCredentials: true,
+        });
+        setCsrfToken(response.data.csrfToken);
+        console.log('CSRF token fetched:', response.data.csrfToken);
+      } catch (err) {
+        console.error('Failed to fetch CSRF token:', err.message);
+        setError('Failed to initialize payment system. Please try again.');
+        toast.error('Payment system initialization failed');
+      }
+    };
+    fetchCsrfToken();
+  }, []);
 
   // Load PayHere SDK
   useEffect(() => {
@@ -39,11 +72,12 @@ const RightCard = ({ item }) => {
     script.src = payhereScriptUrl;
     script.async = true;
     script.onload = () => {
-      console.log('PayHere SDK loaded successfully');
+      console.log('PayHere SDK loaded successfully from:', payhereScriptUrl);
       if (window.payhere) {
         window.payhere.onCompleted = (orderId) => {
           console.log('Payment completed. OrderID:', orderId);
           setIsLoading(false);
+          setShowForm(true);
           toast.success(`PayHere payment completed: OrderID ${orderId}`);
           navigate('/success');
         };
@@ -51,6 +85,8 @@ const RightCard = ({ item }) => {
         window.payhere.onDismissed = () => {
           console.log('Payment dismissed');
           setIsLoading(false);
+          setShowPayPal(false);
+          setShowForm(true);
           setError('PayHere payment was cancelled.');
           toast.info('PayHere payment cancelled');
         };
@@ -58,6 +94,8 @@ const RightCard = ({ item }) => {
         window.payhere.onError = (error) => {
           console.error('PayHere error:', error);
           setIsLoading(false);
+          setShowPayPal(false);
+          setShowForm(true);
           setError(`PayHere payment failed: ${error}`);
           toast.error(`PayHere payment failed: ${error}`);
         };
@@ -84,16 +122,73 @@ const RightCard = ({ item }) => {
     };
   }, [navigate]);
 
+  // Handle form input changes
+  const handleInputChange = (e) => {
+    const { name, value } = e.target;
+    setFormData({ ...formData, [name]: value });
+    if (formErrors[name]) {
+      setFormErrors({ ...formErrors, [name]: '' });
+    }
+  };
+
+  // Validate form
+  const validateForm = () => {
+    const errors = {};
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!formData.first_name.trim()) errors.first_name = 'First name is required';
+    if (!formData.last_name.trim()) errors.last_name = 'Last name is required';
+    if (!formData.email.trim()) {
+      errors.email = 'Email is required';
+    } else if (!emailRegex.test(formData.email)) {
+      errors.email = 'Invalid email format';
+    }
+    if (!formData.phone.trim()) errors.phone = 'Phone number is required';
+    if (!formData.address.trim()) errors.address = 'Address is required';
+    if (!formData.city.trim()) errors.city = 'City is required';
+    if (!formData.country.trim()) errors.country = 'Country is required';
+    if (!formData.delivery_address.trim()) errors.delivery_address = 'Delivery address is required';
+    if (!formData.delivery_city.trim()) errors.delivery_city = 'Delivery city is required';
+    if (!formData.delivery_country.trim()) errors.delivery_country = 'Delivery country is required';
+    return errors;
+  };
+
+  // Handle form submission
+  const handleFormSubmit = () => {
+    const errors = validateForm();
+    if (Object.keys(errors).length > 0) {
+      setFormErrors(errors);
+      toast.error('Please fill in all required fields correctly');
+      return;
+    }
+    setShowForm(false);
+    setError(null);
+  };
+
+  // Handle back to form
+  const handleBackToForm = () => {
+    setShowForm(true);
+    setShowPayPal(false);
+    setError(null);
+  };
+
   const handlePayHerePayment = async () => {
+    if (!csrfToken) {
+      setError('CSRF token not loaded. Please refresh and try again.');
+      toast.error('CSRF token not loaded');
+      return;
+    }
+
     if (!item || !item.price || !item.duration) {
       setError('Invalid package data');
       toast.error('Invalid package data');
+      setShowForm(true);
       return;
     }
 
     if (!window.payhere) {
       setError('Payment system not loaded. Please try again.');
       toast.error('Payment system not loaded');
+      setShowForm(true);
       return;
     }
 
@@ -106,43 +201,50 @@ const RightCard = ({ item }) => {
       merchant_id: import.meta.env.VITE_PAYHERE_MERCHANT_ID,
       return_url: `${window.location.origin}/success`,
       cancel_url: `${window.location.origin}/custompage`,
-      notify_url: `https://232db9201b90.ngrok-free.app/api/payments/notify/payhere`,
+      notify_url: `https://cea50e9d88f6.ngrok-free.app/api/payments/notify/payhere`,
       order_id: `ORDER_${Date.now()}`,
       items: item.name || item.duration,
       amount: item.price.toFixed(2),
-      currency: 'USD',
-      first_name: 'Customer',
-      last_name: 'Traveler',
-      email: 'customer@example.com',
-      phone: '1234567890',
-      address: '123 Travel St',
-      city: 'Travel City',
-      country: 'United States',
-      delivery_address: '123 Travel St',
-      delivery_city: 'Travel City',
-      delivery_country: 'United States',
+      currency: 'LKR',
+      first_name: formData.first_name,
+      last_name: formData.last_name,
+      email: formData.email,
+      phone: formData.phone,
+      address: formData.address,
+      city: formData.city,
+      country: formData.country,
+      delivery_address: formData.delivery_address,
+      delivery_city: formData.delivery_city,
+      delivery_country: formData.delivery_country,
       custom_1: '',
       custom_2: '',
-      iframe: false // Explicitly disable iframe mode
+      iframe: false,
     };
 
     try {
       console.log('Sending payment request to backend:', payment);
       const response = await axios.post(
         `${import.meta.env.VITE_BACKEND_URL}/api/payments/initiate/payhere`,
-        payment
+        payment,
+        {
+          headers: { 'X-CSRF-Token': csrfToken },
+          withCredentials: true,
+        }
       );
       console.log('Backend response:', response.data);
       if (!response.data.success) {
         throw new Error(response.data.error || 'Failed to initiate PayHere payment');
       }
       payment.hash = response.data.hash;
+      payment.custom_1 = response.data.custom_1;
       console.log('Initiating PayHere payment:', payment);
       window.payhere.startPayment(payment);
+      console.log('Modal triggered, waiting for user interaction');
     } catch (err) {
       setError('Failed to initiate PayHere payment. Please try again.');
       console.error('PayHere payment error:', err.message);
       setIsLoading(false);
+      setShowForm(true);
       toast.error('PayHere payment initiation failed: ' + err.message);
     }
   };
@@ -153,10 +255,17 @@ const RightCard = ({ item }) => {
   };
 
   const createPayPalOrder = async () => {
+    if (!csrfToken) {
+      setError('CSRF token not loaded. Please refresh and try again.');
+      toast.error('CSRF token not loaded');
+      return;
+    }
+
     if (!item || !item.price || !item.duration) {
       setError('Invalid package data');
       setIsLoading(false);
       setShowPayPal(false);
+      setShowForm(true);
       toast.error('Invalid package data');
       return;
     }
@@ -170,12 +279,25 @@ const RightCard = ({ item }) => {
       quantity: 1,
       successUrl: `${window.location.origin}/success`,
       cancelUrl: `${window.location.origin}/custompage`,
+      customer: {
+        first_name: formData.first_name,
+        last_name: formData.last_name,
+        email: formData.email,
+        phone: formData.phone,
+        address: formData.address,
+        city: formData.city,
+        country: formData.country,
+      },
     };
 
     try {
       const response = await axios.post(
         `${import.meta.env.VITE_BACKEND_URL}/api/payments/create-checkout-session/paypal`,
-        bookingData
+        bookingData,
+        {
+          headers: { 'X-CSRF-Token': csrfToken },
+          withCredentials: true,
+        }
       );
       return response.data.orderId;
     } catch (err) {
@@ -183,19 +305,42 @@ const RightCard = ({ item }) => {
       console.error('PayPal order creation error:', err);
       setIsLoading(false);
       setShowPayPal(false);
+      setShowForm(true);
       toast.error('PayPal payment initiation failed');
       throw err;
     }
   };
 
   const onPayPalApprove = async (data, actions) => {
+    if (!csrfToken) {
+      setError('CSRF token not loaded. Please refresh and try again.');
+      toast.error('CSRF token not loaded');
+      return;
+    }
+
     try {
       const details = await actions.order.capture();
       setIsLoading(false);
       setShowPayPal(false);
-      await axios.post(`${import.meta.env.VITE_BACKEND_URL}/api/payments/capture-paypal-payment`, {
-        orderId: data.orderID,
-      });
+      await axios.post(
+        `${import.meta.env.VITE_BACKEND_URL}/api/payments/capture-paypal-payment`,
+        {
+          orderId: data.orderID,
+          customer: {
+            first_name: formData.first_name,
+            last_name: formData.last_name,
+            email: formData.email,
+            phone: formData.phone,
+            address: formData.address,
+            city: formData.city,
+            country: formData.country,
+          },
+        },
+        {
+          headers: { 'X-CSRF-Token': csrfToken },
+          withCredentials: true,
+        }
+      );
       toast.success('PayPal payment completed successfully');
       navigate('/success');
     } catch (err) {
@@ -203,6 +348,7 @@ const RightCard = ({ item }) => {
       console.error('PayPal capture error:', err);
       setIsLoading(false);
       setShowPayPal(false);
+      setShowForm(true);
       toast.error('PayPal payment failed');
     }
   };
@@ -211,6 +357,7 @@ const RightCard = ({ item }) => {
     console.log('PayPal modal cancelled');
     setIsLoading(false);
     setShowPayPal(false);
+    setShowForm(true);
     setError('PayPal payment was cancelled.');
     toast.info('PayPal payment cancelled');
   };
@@ -219,13 +366,10 @@ const RightCard = ({ item }) => {
     <ErrorBoundary>
       <div className="w-full md:w-1/3">
         <div className="sticky bg-green-100 p-4 rounded-xl shadow-lg shadow-green-800 space-y-6 border border-gray-200 self-start mt-10">
-          {/* Duration */}
           <div>
             <h3 className="text-gray-600 text-sm">Duration</h3>
             <p className="text-gray-800 font-semibold text-base">{item.duration}</p>
           </div>
-
-          {/* Booking Info */}
           <div className="text-sm">
             <p className="font-semibold text-black mb-1">
               Book before <span className="font-normal ml-2">{item.book_before}</span>
@@ -234,81 +378,206 @@ const RightCard = ({ item }) => {
               Stay between <span className="font-normal ml-2">{item.stay_between}</span>
             </p>
           </div>
-
-          {/* Price */}
           <div>
             <p className="text-2xl font-bold text-black">USD ${item.price}</p>
             <p className="text-sm text-gray-600">Per Person</p>
           </div>
-
-          {/* Loading Spinner */}
+          {showForm && (
+            <div className="space-y-4">
+              <h3 className="text-gray-600 text-sm font-semibold">Enter Your Details</h3>
+              <div>
+                <input
+                  type="text"
+                  name="first_name"
+                  value={formData.first_name}
+                  onChange={handleInputChange}
+                  placeholder="First Name"
+                  className="w-full p-2 border border-gray-300 rounded-md text-sm"
+                />
+                {formErrors.first_name && <p className="text-xs text-red-500">{formErrors.first_name}</p>}
+              </div>
+              <div>
+                <input
+                  type="text"
+                  name="last_name"
+                  value={formData.last_name}
+                  onChange={handleInputChange}
+                  placeholder="Last Name"
+                  className="w-full p-2 border border-gray-300 rounded-md text-sm"
+                />
+                {formErrors.last_name && <p className="text-xs text-red-500">{formErrors.last_name}</p>}
+              </div>
+              <div>
+                <input
+                  type="email"
+                  name="email"
+                  value={formData.email}
+                  onChange={handleInputChange}
+                  placeholder="Email"
+                  className="w-full p-2 border border-gray-300 rounded-md text-sm"
+                />
+                {formErrors.email && <p className="text-xs text-red-500">{formErrors.email}</p>}
+              </div>
+              <div>
+                <input
+                  type="tel"
+                  name="phone"
+                  value={formData.phone}
+                  onChange={handleInputChange}
+                  placeholder="Phone Number"
+                  className="w-full p-2 border border-gray-300 rounded-md text-sm"
+                />
+                {formErrors.phone && <p className="text-xs text-red-500">{formErrors.phone}</p>}
+              </div>
+              <div>
+                <input
+                  type="text"
+                  name="address"
+                  value={formData.address}
+                  onChange={handleInputChange}
+                  placeholder="Address"
+                  className="w-full p-2 border border-gray-300 rounded-md text-sm"
+                />
+                {formErrors.address && <p className="text-xs text-red-500">{formErrors.address}</p>}
+              </div>
+              <div>
+                <input
+                  type="text"
+                  name="city"
+                  value={formData.city}
+                  onChange={handleInputChange}
+                  placeholder="City"
+                  className="w-full p-2 border border-gray-300 rounded-md text-sm"
+                />
+                {formErrors.city && <p className="text-xs text-red-500">{formErrors.city}</p>}
+              </div>
+              <div>
+                <input
+                  type="text"
+                  name="country"
+                  value={formData.country}
+                  onChange={handleInputChange}
+                  placeholder="Country"
+                  className="w-full p-2 border border-gray-300 rounded-md text-sm"
+                />
+                {formErrors.country && <p className="text-xs text-red-500">{formErrors.country}</p>}
+              </div>
+              <div>
+                <input
+                  type="text"
+                  name="delivery_address"
+                  value={formData.delivery_address}
+                  onChange={handleInputChange}
+                  placeholder="Delivery Address"
+                  className="w-full p-2 border border-gray-300 rounded-md text-sm"
+                />
+                {formErrors.delivery_address && <p className="text-xs text-red-500">{formErrors.delivery_address}</p>}
+              </div>
+              <div>
+                <input
+                  type="text"
+                  name="delivery_city"
+                  value={formData.delivery_city}
+                  onChange={handleInputChange}
+                  placeholder="Delivery City"
+                  className="w-full p-2 border border-gray-300 rounded-md text-sm"
+                />
+                {formErrors.delivery_city && <p className="text-xs text-red-500">{formErrors.delivery_city}</p>}
+              </div>
+              <div>
+                <input
+                  type="text"
+                  name="delivery_country"
+                  value={formData.delivery_country}
+                  onChange={handleInputChange}
+                  placeholder="Delivery Country"
+                  className="w-full p-2 border border-gray-300 rounded-md text-sm"
+                />
+                {formErrors.delivery_country && <p className="text-xs text-red-500">{formErrors.delivery_country}</p>}
+              </div>
+              <button
+                onClick={handleFormSubmit}
+                className="bg-green-500 text-white px-6 py-2 rounded-full transition text-sm font-semibold hover:bg-green-600"
+              >
+                Submit Details
+              </button>
+            </div>
+          )}
+          {!showForm && (
+            <div className="space-y-2">
+              <h3 className="text-gray-600 text-sm font-semibold">Your Details</h3>
+              <p className="text-sm text-gray-800">Name: {formData.first_name} {formData.last_name}</p>
+              <p className="text-sm text-gray-800">Email: {formData.email}</p>
+              <p className="text-sm text-gray-800">Phone: {formData.phone}</p>
+              <p className="text-sm text-gray-800">Address: {formData.address}, {formData.city}, {formData.country}</p>
+              <p className="text-sm text-gray-800">Delivery: {formData.delivery_address}, {formData.delivery_city}, {formData.delivery_country}</p>
+              <button
+                onClick={handleBackToForm}
+                className="bg-gray-500 text-white px-4 py-1 rounded-full transition text-xs font-semibold hover:bg-gray-600"
+              >
+                Edit Details
+              </button>
+            </div>
+          )}
           {isLoading && (
             <div className="text-center text-gray-600">Processing payment...</div>
           )}
-
-          {/* Payment Buttons */}
-          <div className="flex flex-col space-y-4">
-            <button
-              id="payhere-payment"
-              onClick={handlePayHerePayment}
-              disabled={isLoading}
-              className={`bg-green-500 text-white px-6 py-2 rounded-full transition text-sm font-semibold ${
-                isLoading ? 'opacity-50 cursor-not-allowed' : 'hover:bg-green-600'
-              }`}
-            >
-              {isLoading ? 'Processing...' : 'Pay with PayHere'}
-            </button>
-            <button
-              onClick={handlePayPalClick}
-              disabled={isLoading}
-              className={`bg-blue-600 text-white px-6 py-2 rounded-full transition text-sm font-semibold ${
-                isLoading ? 'opacity-50 cursor-not-allowed' : 'hover:bg-blue-700'
-              }`}
-            >
-              {isLoading && showPayPal ? 'Processing...' : 'Pay with PayPal'}
-            </button>
-
-            {/* PayPal Buttons */}
-            {showPayPal && (
-              <PayPalScriptProvider
-                options={{
-                  'client-id': import.meta.env.VITE_PAYPAL_CLIENT_ID,
-                  currency: 'USD',
-                  components: 'buttons,card-fields',
-                }}
+          {!showForm && (
+            <div className="flex flex-col space-y-4">
+              <button
+                id="payhere-payment"
+                onClick={handlePayHerePayment}
+                disabled={isLoading || !csrfToken}
+                className={`bg-green-500 text-white px-6 py-2 rounded-full transition text-sm font-semibold ${
+                  isLoading || !csrfToken ? 'opacity-50 cursor-not-allowed' : 'hover:bg-green-600'
+                }`}
               >
-                <PayPalButtons
-                  style={{ layout: 'vertical', color: 'gold', shape: 'rect', label: 'paypal' }}
-                  disabled={isLoading}
-                  createOrder={createPayPalOrder}
-                  onApprove={onPayPalApprove}
-                  onError={(err) => {
-                    setError('PayPal payment failed. Please try again.');
-                    console.error('PayPal button error:', err);
-                    setIsLoading(false);
-                    setShowPayPal(false);
-                    toast.error('PayPal payment failed');
+                {isLoading ? 'Processing...' : 'Pay with PayHere'}
+              </button>
+              <button
+                onClick={handlePayPalClick}
+                disabled={isLoading || !csrfToken}
+                className={`bg-blue-600 text-white px-6 py-2 rounded-full transition text-sm font-semibold ${
+                  isLoading || !csrfToken ? 'opacity-50 cursor-not-allowed' : 'hover:bg-blue-700'
+                }`}
+              >
+                {isLoading && showPayPal ? 'Processing...' : 'Pay with PayPal'}
+              </button>
+              {showPayPal && (
+                <PayPalScriptProvider
+                  options={{
+                    'client-id': import.meta.env.VITE_PAYPAL_CLIENT_ID,
+                    currency: 'USD',
+                    components: 'buttons,card-fields',
                   }}
-                  onCancel={onPayPalCancel}
-                />
-              </PayPalScriptProvider>
-            )}
-          </div>
-
-          {/* Error Message */}
+                >
+                  <PayPalButtons
+                    style={{ layout: 'vertical', color: 'gold', shape: 'rect', label: 'paypal' }}
+                    disabled={isLoading}
+                    createOrder={createPayPalOrder}
+                    onApprove={onPayPalApprove}
+                    onError={(err) => {
+                      setError('PayPal payment failed. Please try again.');
+                      console.error('PayPal button error:', err);
+                      setIsLoading(false);
+                      setShowPayPal(false);
+                      setShowForm(true);
+                      toast.error('PayPal payment failed');
+                    }}
+                    onCancel={onPayPalCancel}
+                  />
+                </PayPalScriptProvider>
+              )}
+            </div>
+          )}
           {error && <p className="text-xs text-red-500">{error}</p>}
-
-          {/* Reply Note */}
           <p className="text-xs text-gray-500">*Our reply time is almost instant</p>
-
           <img
             src="https://images.pexels.com/photos/1051075/pexels-photo-1051075.jpeg"
             alt="Travel"
             className="w-1/2"
           />
         </div>
-
-        {/* More Detail */}
         <div className="mt-10">
           <p className="prata-regular text-sm sm:text-xl mt-10">More Detail</p>
           <p className="inter-regular text-base sm:text-sm mt-10 letter-spacing: var(--tracking-wide)">
