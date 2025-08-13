@@ -6,9 +6,11 @@ import { TravelContext } from "../../Context/TravelContext";
 import RightCard from "./RightCard";
 import PackageCard from "./PackageCard";
 import TrendingCard from "./TrendingCard";
+import { v4 as uuidv4 } from 'uuid';
 
 const Package = () => {
   const { addpackage, addtrend, navigate } = useContext(TravelContext);
+
 
   // ✅ Get package name from URL and decode it
   const { name } = useParams();
@@ -27,7 +29,8 @@ const Package = () => {
   const item = addpackage.find(
     (pkg) => pkg.name.toLowerCase() === decodedName.toLowerCase()
   );
-
+  
+  const uniqueKey = item?.id || uuidv4();
   // ✅ Show error if package not found
   if (!item) {
     return (
@@ -103,7 +106,7 @@ const Package = () => {
       </div>
 
       {/* ---------------- Right Side ---------------- */}
-      <RightCard item={item} />
+      <RightCard key={uniqueKey} item={item} />
     </div>
   );
 };

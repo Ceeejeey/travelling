@@ -4,17 +4,18 @@ import 'dotenv/config';
 import router from './router/PackageRoute.js';
 import connectDB from './config/mongodb.js';
 import session from 'express-session';
+import MongoStore from 'connect-mongo';
 import includerouter from './router/includeRouter.js';
 import trendrouter from './router/trendingRouter.js';
 import loginrouter from './controller/logincontroller.js';
 import gallryRouter from './router/GalleryRouter.js';
 import paymentRoutes from './router/PaymentRouter.js';
 
-
 const app = express();
 const port = process.env.PORT || 4000;
-connectDB();
 
+// Connect to MongoDB
+connectDB();
 
 // CORS configuration
 app.use(cors({
@@ -24,26 +25,33 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'X-CSRF-Token'],
 }));
 
-// Session middleware
+// Session configuration
 app.use(session({
-  secret: process.env.SESSION_SECRET || 'your-session-secret',
+  secret: process.env.SESSION_SECRET,
   resave: false,
   saveUninitialized: false,
+  store: MongoStore.create({
+    mongoUrl: process.env.MONGO_URL,
+    collectionName: 'sessions',
+  }),
   cookie: {
     httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    maxAge: 24 * 60 * 60 * 1000, // 24 hours
+    secure: true, // Always true for HTTPS
+    maxAge: 24 * 60 * 60 * 1000,
+    sameSite: 'none',
   },
 }));
+
+// Middleware
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
-app.use(express.urlencoded({ extended: true }));  
-
+// Routes
 app.use('/api/package', router);
 app.use('/api/include', includerouter);
-app.use('/api/trending',trendrouter);
-app.use('/api/admin',loginrouter);
-app.use('/api/gallery',gallryRouter);
+app.use('/api/trending', trendrouter);
+app.use('/api/admin', loginrouter);
+app.use('/api/gallery', gallryRouter);
 app.use('/api/payments', paymentRoutes);
 
 app.get('/', (req, res) => {
