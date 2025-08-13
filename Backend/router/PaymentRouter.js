@@ -38,15 +38,16 @@ const PaymentSchema = new mongoose.Schema({
     delivery_address: { type: String },
     delivery_city: { type: String },
     delivery_country: { type: String },
+    tripName: { type: String },
   },
   created_at: { type: Date, default: Date.now },
 });
 
 const Payment = mongoose.model('Payment', PaymentSchema);
 
-// Cookie parser and CSRF
+// Middleware
 router.use(cookieParser());
-const csrfProtection = csurf({ cookie: { httpOnly: true, secure: process.env.NODE_ENV === 'production' } });
+const csrfProtection = csurf({ cookie: { httpOnly: true, secure: true, sameSite: 'none' } });
 
 // Rate limiting
 const limiter = rateLimit({
@@ -69,6 +70,23 @@ router.get('/csrf-token', csrfProtection, (req, res) => {
   const token = req.csrfToken();
   console.log('Generated CSRF token:', token, 'Session ID:', req.sessionID);
   res.json({ csrfToken: token });
+});
+
+// Check order status by tripName
+router.get('/check-order-status/:tripName', csrfProtection, async (req, res) => {
+  try {
+    const { tripName } = req.params;
+    console.log('Checking order status for trip:', tripName, 'Session ID:', req.sessionID);
+    const payment = await Payment.findOne({ 'customer.tripName': sanitize(tripName), paymentType: 'PayPal' }).sort({ created_at: -1 });
+    if (payment) {
+      console.log('Found existing payment:', { order_id: payment.order_id, status: payment.status });
+      return res.json({ status: payment.status });
+    }
+    res.json({ status: 'NOT_FOUND' });
+  } catch (error) {
+    console.error('Error checking order status:', error.message);
+    res.status(500).json({ error: 'Failed to check order status', details: error.message });
+  }
 });
 
 router.post('/initiate/payhere', csrfProtection, async (req, res) => {
@@ -309,30 +327,30 @@ router.post('/notify/payhere', async (req, res) => {
 router.post('/create-checkout-session/paypal', csrfProtection, async (req, res) => {
   try {
     const { tripName, amount, quantity, successUrl, cancelUrl, customer } = req.body;
-    console.log('Creating PayPal order:', { tripName, amount, quantity, successUrl, cancelUrl });
+    console.log('Creating PayPal order:', { tripName, amount, quantity, successUrl, cancelUrl, sessionId: req.sessionID });
     const request = new paypal.orders.OrdersCreateRequest();
     request.prefer('return=representation');
     request.requestBody({
-      intent: 'CAPTURE',
+      intent: 'AUTHORIZE',
       purchase_units: [
         {
           amount: {
             currency_code: 'USD',
             value: (amount / 100).toFixed(2),
           },
-          description: tripName,
+          description: sanitize(tripName),
           quantity: quantity,
         },
       ],
       application_context: {
-        return_url: successUrl,
-        cancel_url: cancelUrl,
-        user_action: 'PAY_NOW', // Ensure immediate capture on approval
+        return_url: sanitize(successUrl),
+        cancel_url: sanitize(cancelUrl),
+        user_action: 'CONTINUE',
       },
     });
 
     const response = await paypalClient.execute(request);
-    console.log('PayPal order created:', { orderId: response.result.id, status: response.result.status });
+    console.log('PayPal order created:', { orderId: response.result.id, status: response.result.status, sessionId: req.sessionID });
     res.json({ orderId: response.result.id });
   } catch (error) {
     console.error('PayPal order creation error:', error.message, error.response?.result);
@@ -342,16 +360,16 @@ router.post('/create-checkout-session/paypal', csrfProtection, async (req, res) 
 
 router.post('/capture-paypal-payment', csrfProtection, async (req, res) => {
   try {
-    const { orderId, customer } = req.body;
-    console.log('Attempting to capture PayPal order:', { orderId });
+    const { orderId, tripName, customer, amount } = req.body; // Added amount from request
+    console.log('Processing PayPal payment:', { orderId, tripName, sessionId: req.sessionID });
 
     // Check if payment already exists in MongoDB
     const existingPayment = await Payment.findOne({ order_id: orderId, paymentType: 'PayPal' });
     if (existingPayment) {
-      console.log('PayPal payment already captured in MongoDB:', { orderId, status: existingPayment.status });
+      console.log('PayPal payment already processed:', { orderId, status: existingPayment.status });
       return res.status(400).json({
         success: false,
-        error: 'Order already captured',
+        error: 'Order already processed',
         details: 'This PayPal order has already been processed in the database.',
       });
     }
@@ -359,22 +377,63 @@ router.post('/capture-paypal-payment', csrfProtection, async (req, res) => {
     // Check PayPal order status
     const orderRequest = new paypal.orders.OrdersGetRequest(orderId);
     const orderResponse = await paypalClient.execute(orderRequest);
-    console.log('PayPal order status check:', { orderId, status: orderResponse.result.status });
-    if (orderResponse.result.status === 'COMPLETED' || orderResponse.result.status === 'APPROVED') {
-      console.log('PayPal order already captured on PayPal side:', { orderId, status: orderResponse.result.status });
-      return res.status(400).json({
-        success: false,
-        error: 'Order already captured',
-        details: 'This PayPal order has already been captured.',
+    console.log('PayPal order status check:', { orderId, status: orderResponse.result.status, details: orderResponse.result });
+
+    // Save payment if status is APPROVED or COMPLETED
+    if (orderResponse.result.status === 'APPROVED' || orderResponse.result.status === 'COMPLETED') {
+      const purchaseUnit = orderResponse.result.purchase_units[0];
+      const amountObj = purchaseUnit.amount;
+      if (!amountObj || !amountObj.currency_code || !amountObj.value) {
+        console.error('Invalid order amount:', amountObj);
+        throw new Error('Invalid order response: missing amount data');
+      }
+
+      const sanitizedCustomer = customer
+        ? {
+            first_name: sanitize(customer.first_name),
+            last_name: sanitize(customer.last_name),
+            email: sanitize(customer.email),
+            phone: sanitize(customer.phone),
+            address: sanitize(customer.address),
+            city: sanitize(customer.city),
+            country: sanitize(customer.country),
+            tripName: sanitize(tripName),
+          }
+        : {};
+
+      const payment = new Payment({
+        paymentType: 'PayPal',
+        order_id: orderId,
+        payment_id: orderResponse.result.id, // Use orderId as payment_id
+        amount: parseFloat(amountObj.value || (amount / 100).toFixed(2)), // Fallback to request amount
+        currency: amountObj.currency_code,
+        status: orderResponse.result.status,
+        customer: sanitizedCustomer,
       });
+      await payment.save();
+      console.log('PayPal payment saved to MongoDB:', {
+        orderId,
+        payment_id: orderResponse.result.id,
+        amount: payment.amount,
+        status: payment.status,
+      });
+
+      return res.json({ success: true, status: payment.status });
     }
 
-    // Proceed with capture
-    const request = new paypal.orders.OrdersCaptureRequest(orderId);
-    const response = await paypalClient.execute(request);
-    const { status, purchase_units } = response.result;
-    const amount = parseFloat(purchase_units[0].amount.value);
-    const currency = purchase_units[0].amount.currency_code;
+    // Authorize the order (optional, for non-APPROVED cases)
+    const authRequest = new paypal.orders.OrdersAuthorizeRequest(orderId);
+    authRequest.requestBody({});
+    const authResponse = await paypalClient.execute(authRequest);
+    console.log('PayPal order authorized:', { orderId, authDetails: authResponse.result });
+
+    // Save payment after authorization
+    const purchaseUnit = authResponse.result.purchase_units[0];
+    const amountObj = purchaseUnit.amount;
+    if (!amountObj || !amountObj.currency_code || !amountObj.value) {
+      console.error('Invalid authorization amount:', amountObj);
+      throw new Error('Invalid authorization response: missing amount data');
+    }
 
     const sanitizedCustomer = customer
       ? {
@@ -385,32 +444,31 @@ router.post('/capture-paypal-payment', csrfProtection, async (req, res) => {
           address: sanitize(customer.address),
           city: sanitize(customer.city),
           country: sanitize(customer.country),
+          tripName: sanitize(tripName),
         }
       : {};
 
     const payment = new Payment({
       paymentType: 'PayPal',
       order_id: orderId,
-      amount,
-      currency,
-      status,
+      payment_id: authResponse.result.id, // Use orderId as payment_id
+      amount: parseFloat(amountObj.value || (amount / 100).toFixed(2)), // Fallback to request amount
+      currency: amountObj.currency_code,
+      status: authResponse.result.status,
       customer: sanitizedCustomer,
     });
     await payment.save();
-    console.log('PayPal payment saved to MongoDB:', { orderId, amount, status });
+    console.log('PayPal payment saved to MongoDB:', {
+      orderId,
+      payment_id: authResponse.result.id,
+      amount: payment.amount,
+      status: payment.status,
+    });
 
-    res.json({ success: true, status });
+    res.json({ success: true, status: payment.status });
   } catch (error) {
-    console.error('PayPal capture error:', error.message, error.response?.result);
-    if (error.response?.result?.name === 'UNPROCESSABLE_ENTITY' && error.response.result.details?.[0]?.issue === 'ORDER_ALREADY_CAPTURED') {
-      console.log('PayPal order already captured (caught in error handler):', { orderId });
-      return res.status(400).json({
-        success: false,
-        error: 'Order already captured',
-        details: 'This PayPal order has already been captured.',
-      });
-    }
-    res.status(500).json({ success: false, error: 'Failed to capture PayPal payment', details: error.message });
+    console.error('PayPal payment error:', error.message, error.response?.result);
+    res.status(500).json({ success: false, error: 'Failed to process PayPal payment', details: error.message });
   }
 });
 
