@@ -1,8 +1,86 @@
-import React from 'react';
-import { useNavigate } from 'react-router-dom';
+import React, { useState, useEffect } from 'react';
+import { useNavigate, useLocation } from 'react-router-dom';
+import axios from 'axios';
+
+const backendUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:4000';
 
 const Success = () => {
   const navigate = useNavigate();
+  const location = useLocation();
+  const [payment, setPayment] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  // Extract orderId from URL query (e.g., ?orderId=ORDER_1755543375236)
+  const query = new URLSearchParams(location.search);
+  const orderId = query.get('orderId');
+
+  // Fetch payment details from backend
+  useEffect(() => {
+    const fetchPayment = async () => {
+      try {
+        const response = await axios.get(`${backendUrl}/api/after-payments/${orderId}`, {
+          withCredentials: true,
+        });
+        setPayment(response.data);
+        setLoading(false);
+      } catch (err) {
+        setError('Failed to fetch payment details');
+        setLoading(false);
+      }
+    };
+    if (orderId) fetchPayment();
+    else setError('No order ID provided');
+  }, [orderId]);
+
+  // Handle email receipt
+  const handleEmailReceipt = async () => {
+    try {
+      await axios.post(
+        `${backendUrl}/api/after-payments/${orderId}/email-receipt`,
+        {},
+        { withCredentials: true }
+      );
+      alert('Receipt sent to your email!');
+    } catch (err) {
+      alert('Failed to send email receipt');
+    }
+  };
+
+  // Handle download receipt
+  const handleDownloadReceipt = async () => {
+    try {
+      const response = await axios.get(`${backendUrl}/api/after-payments/${orderId}/download-receipt`, {
+        withCredentials: true,
+        responseType: 'blob', // For PDF download
+      });
+      const url = window.URL.createObjectURL(new Blob([response.data]));
+      const link = document.createElement('a');
+      link.href = url;
+      link.setAttribute('download', `receipt_${orderId}.pdf`);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+    } catch (err) {
+      alert('Failed to download receipt');
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gray-50 p-4">
+        <p className="text-gray-600">Loading...</p>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gray-50 p-4">
+        <p className="text-red-600">{error}</p>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-gray-50 p-4">
@@ -29,10 +107,30 @@ const Success = () => {
           Payment Successful
         </h1>
         <p className="text-sm text-gray-600 text-center">
-          Your booking is confirmed! A confirmation email will be sent soon.
+          Your payment for {payment?.customer.tripName} is confirmed!
         </p>
-        {/* Back to Home Button */}
-        <div className="flex justify-center">
+        {/* Payment Details */}
+        <div className="text-sm text-gray-600 space-y-2">
+          <p><strong>Order ID:</strong> {payment?.order_id}</p>
+          <p><strong>Payment Type:</strong> {payment?.paymentType}</p>
+          <p><strong>Amount:</strong> {payment?.currency} {payment?.amount}</p>
+          <p><strong>Email:</strong> {payment?.customer.email}</p>
+          <p><strong>Name:</strong> {payment?.customer.first_name} {payment?.customer.last_name}</p>
+        </div>
+        {/* Action Buttons */}
+        <div className="flex flex-col space-y-4">
+          <button
+            onClick={handleEmailReceipt}
+            className="bg-green-500 text-white px-6 py-2 rounded-full hover:bg-green-600 transition text-sm font-medium"
+          >
+            Email Receipt
+          </button>
+          <button
+            onClick={handleDownloadReceipt}
+            className="bg-green-500 text-white px-6 py-2 rounded-full hover:bg-green-600 transition text-sm font-medium"
+          >
+            Download Receipt
+          </button>
           <button
             onClick={() => navigate('/')}
             className="bg-green-500 text-white px-6 py-2 rounded-full hover:bg-green-600 transition text-sm font-medium"
