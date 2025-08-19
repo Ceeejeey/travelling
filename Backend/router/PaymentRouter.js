@@ -6,6 +6,7 @@ import csurf from 'csurf';
 import rateLimit from 'express-rate-limit';
 import sanitizeHtml from 'sanitize-html';
 import cookieParser from 'cookie-parser';
+import Payment from '../schema/PaymentSchema.js';
 
 const router = express.Router();
 
@@ -17,33 +18,7 @@ const paypalClient = new paypal.core.PayPalHttpClient(
   )
 );
 
-// Payment schema
-const PaymentSchema = new mongoose.Schema({
-  paymentType: { type: String, required: true, enum: ['PayHere', 'PayPal'] },
-  merchant_id: { type: String },
-  order_id: { type: String, required: true, unique: true },
-  payment_id: { type: String },
-  amount: { type: Number, required: true },
-  currency: { type: String, required: true },
-  status: { type: String, required: true },
-  md5sig: { type: String },
-  customer: {
-    first_name: { type: String },
-    last_name: { type: String },
-    email: { type: String },
-    phone: { type: String },
-    address: { type: String },
-    city: { type: String },
-    country: { type: String },
-    delivery_address: { type: String },
-    delivery_city: { type: String },
-    delivery_country: { type: String },
-    tripName: { type: String },
-  },
-  created_at: { type: Date, default: Date.now },
-});
 
-const Payment = mongoose.model('Payment', PaymentSchema);
 
 // Middleware
 router.use(cookieParser());
@@ -186,6 +161,7 @@ router.post('/initiate/payhere', csrfProtection, async (req, res) => {
       delivery_address: sanitizedData.delivery_address,
       delivery_city: sanitizedData.delivery_city,
       delivery_country: sanitizedData.delivery_country,
+      tripName: sanitizedData.items,
     });
 
     res.status(200).json({
@@ -276,6 +252,7 @@ router.post('/notify/payhere', async (req, res) => {
           delivery_address: sanitize(customer.delivery_address),
           delivery_city: sanitize(customer.delivery_city),
           delivery_country: sanitize(customer.delivery_country),
+          tripName: sanitize(customer.tripName),
         };
       }
     } catch (err) {

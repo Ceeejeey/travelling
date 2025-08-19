@@ -100,7 +100,8 @@ const RightCard = ({ item }) => {
           setIsLoading(false);
           setShowForm(true);
           toast.success(`PayHere payment completed: OrderID ${orderId}`);
-          navigate('/success');
+          navigate(`/success?orderId=${orderId}`);
+
         };
         window.payhere.onDismissed = () => {
           console.log('Payment dismissed');
@@ -225,11 +226,11 @@ const RightCard = ({ item }) => {
       merchant_id: import.meta.env.VITE_PAYHERE_MERCHANT_ID,
       return_url: `${window.location.origin}/success`,
       cancel_url: `${window.location.origin}/custompage`,
-      notify_url: `https://cea50e9d88f6.ngrok-free.app/api/payments/notify/payhere`,
+      notify_url: `https://376c6260f905.ngrok-free.app/api/payments/notify/payhere`,
       order_id: `ORDER_${Date.now()}`,
       items: item.name || item.duration,
       amount: item.price.toFixed(2),
-      currency: 'USD',
+      currency: 'LKR',
       first_name: formData.first_name,
       last_name: formData.last_name,
       email: formData.email,

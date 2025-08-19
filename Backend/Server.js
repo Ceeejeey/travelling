@@ -10,6 +10,7 @@ import trendrouter from './router/trendingRouter.js';
 import loginrouter from './controller/logincontroller.js';
 import gallryRouter from './router/GalleryRouter.js';
 import paymentRoutes from './router/PaymentRouter.js';
+import afterPaymenRoutes from './router/afterPaymentRouter.js';
 
 const app = express();
 const port = process.env.PORT || 4000;
@@ -53,6 +54,7 @@ app.use('/api/trending', trendrouter);
 app.use('/api/admin', loginrouter);
 app.use('/api/gallery', gallryRouter);
 app.use('/api/payments', paymentRoutes);
+app.use('/api/after-payments', afterPaymenRoutes);
 
 app.get('/', (req, res) => {
   res.send("API working");
