@@ -409,7 +409,7 @@ const RightCard = ({ item }) => {
     setIsLoading(false);
     setShowPayPal(false);
     toast.success('PayPal payment completed successfully');
-    navigate('/success');
+    navigate(`/success?orderId=${data.orderID}`);
   } catch (err) {
     setIsLoading(false);
     setShowPayPal(false);
