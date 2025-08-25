@@ -56,6 +56,30 @@ app.use('/api/gallery', gallryRouter);
 app.use('/api/payments', paymentRoutes);
 app.use('/api/after-payments', afterPaymenRoutes);
 
+
+
+
+app.post('/api/logout', (req, res) => {
+  req.session.destroy((err) => {
+    if (err) return res.status(500).json({ error: 'Failed to logout' });
+    res.clearCookie('session', {
+      domain: 'localhost',
+      path: '/',
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
+    });
+    res.clearCookie('_csrf', {
+      domain: 'localhost',
+      path: '/',
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
+    });
+    res.json({ success: true, message: 'Session cleared' });
+  });
+});
+
+
+
 app.get('/', (req, res) => {
   res.send("API working");
 });

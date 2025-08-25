@@ -45,24 +45,45 @@ const RightCard = ({ item }) => {
   });
   const [formErrors, setFormErrors] = useState({});
   const [showForm, setShowForm] = useState(true);
-  const [csrfToken, setCsrfToken] = useState(sessionStorage.getItem('csrfToken') || '');
+  const [csrfToken, setCsrfToken] = useState('');
   const hasFetchedCsrf = useRef(false);
 
-  // Log component mount
-  useEffect(() => {
-    console.log('RightCard mounted for item:', item?.name || item?.duration);
-    return () => console.log('RightCard unmounted for item:', item?.name || item?.duration);
-  }, [item]);
+  // Clear all storage and cookies
+  const clearSessionData = async () => {
+    try {
+      // Clear storage
+      sessionStorage.clear();
+      localStorage.clear();
+      setCsrfToken('');
+      hasFetchedCsrf.current = false;
+
+      // Clear cookies
+      const domain = window.location.hostname === 'localhost' ? 'localhost' : 'ceejeey.me';
+      document.cookie = `session=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/; domain=${domain}; secure=${window.location.protocol === 'https:'}; SameSite=Lax`;
+      document.cookie = `_csrf=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/; domain=${domain}; secure=${window.location.protocol === 'https:'}; SameSite=Lax`;
+
+      // Clear backend order and session
+      await axios.post(
+        `${import.meta.env.VITE_BACKEND_URL}/api/payments/clear-order`,
+        { tripName: item?.name || item?.duration },
+        { withCredentials: true }
+      );
+      await axios.post(
+        `${import.meta.env.VITE_BACKEND_URL}/api/logout`,
+        {},
+        { withCredentials: true }
+      );
+      console.log('Session data, cookies, and order state cleared');
+    } catch (err) {
+      console.error('Error clearing session data:', err);
+    }
+  };
 
   // Fetch CSRF token
   const fetchCsrfToken = useCallback(async () => {
-    if (csrfToken) {
-      console.log('CSRF token already set:', csrfToken);
-      return;
-    }
     if (hasFetchedCsrf.current) {
-      console.log('CSRF fetch already attempted, skipping');
-      return;
+      console.log('CSRF fetch already attempted, clearing and retrying');
+      await clearSessionData();
     }
     hasFetchedCsrf.current = true;
     try {
@@ -79,16 +100,21 @@ const RightCard = ({ item }) => {
       toast.error('Payment system initialization failed');
       hasFetchedCsrf.current = false;
     }
-  }, [csrfToken]);
+  }, []);
 
+  // Log component mount and fetch CSRF token
   useEffect(() => {
+    console.log('RightCard mounted for item:', item?.name || item?.duration);
     fetchCsrfToken();
-  }, [fetchCsrfToken]);
+    return () => {
+      console.log('RightCard unmounted for item:', item?.name || item?.duration);
+      clearSessionData();
+    };
+  }, [item, fetchCsrfToken]);
 
   // Load PayHere SDK
   useEffect(() => {
     const payhereScriptUrl = 'https://www.payhere.lk/lib/payhere.js';
-
     const script = document.createElement('script');
     script.src = payhereScriptUrl;
     script.async = true;
@@ -101,23 +127,24 @@ const RightCard = ({ item }) => {
           setShowForm(true);
           toast.success(`PayHere payment completed: OrderID ${orderId}`);
           navigate(`/success?orderId=${orderId}`);
-
         };
-        window.payhere.onDismissed = () => {
+        window.payhere.onDismissed = async () => {
           console.log('Payment dismissed');
           setIsLoading(false);
           setShowPayPal(false);
           setShowForm(true);
           setError('PayHere payment was cancelled.');
           toast.info('PayHere payment cancelled');
+          await clearSessionData();
         };
-        window.payhere.onError = (error) => {
+        window.payhere.onError = async (error) => {
           console.error('PayHere error:', error);
           setIsLoading(false);
           setShowPayPal(false);
           setShowForm(true);
           setError(`PayHere payment failed: ${error}`);
           toast.error(`PayHere payment failed: ${error}`);
+          await clearSessionData();
         };
       } else {
         console.error('PayHere SDK not initialized');
@@ -131,7 +158,6 @@ const RightCard = ({ item }) => {
       toast.error('Payment system unavailable');
     };
     document.body.appendChild(script);
-
     return () => {
       document.body.removeChild(script);
       if (window.payhere) {
@@ -186,14 +212,13 @@ const RightCard = ({ item }) => {
   };
 
   // Handle back to form
-  const handleBackToForm = () => {
+  const handleBackToForm = async () => {
     setShowForm(true);
     setShowPayPal(false);
     setError(null);
     setIsPayPalDisabled(false);
-    sessionStorage.removeItem('csrfToken');
-    setCsrfToken('');
-    hasFetchedCsrf.current = false;
+    await clearSessionData();
+    await fetchCsrfToken();
   };
 
   const handlePayHerePayment = async () => {
@@ -202,25 +227,21 @@ const RightCard = ({ item }) => {
       toast.error('CSRF token not loaded');
       return;
     }
-
     if (!item || !item.price || !item.duration) {
       setError('Invalid package data');
       toast.error('Invalid package data');
       setShowForm(true);
       return;
     }
-
     if (!window.payhere) {
       setError('Payment system not loaded. Please try again.');
       toast.error('Payment system not loaded');
       setShowForm(true);
       return;
     }
-
     setIsLoading(true);
     setError(null);
     setShowPayPal(false);
-
     const payment = {
       sandbox: true,
       merchant_id: import.meta.env.VITE_PAYHERE_MERCHANT_ID,
@@ -245,7 +266,6 @@ const RightCard = ({ item }) => {
       custom_2: '',
       iframe: false,
     };
-
     try {
       console.log('Sending payment request to backend:', payment);
       const response = await axios.post(
@@ -271,10 +291,14 @@ const RightCard = ({ item }) => {
       setIsLoading(false);
       setShowForm(true);
       toast.error('PayHere payment initiation failed: ' + err.message);
+      await clearSessionData();
+      await fetchCsrfToken();
     }
   };
 
-  const handlePayPalClick = () => {
+  const handlePayPalClick = async () => {
+    await clearSessionData();
+    await fetchCsrfToken();
     setShowPayPal(true);
     setError(null);
     setIsPayPalDisabled(true);
@@ -287,7 +311,6 @@ const RightCard = ({ item }) => {
       setIsPayPalDisabled(false);
       return;
     }
-
     if (!item || !item.price || !item.duration) {
       setError('Invalid package data');
       setIsLoading(false);
@@ -297,10 +320,8 @@ const RightCard = ({ item }) => {
       toast.error('Invalid package data');
       return;
     }
-
     setIsLoading(true);
     setError(null);
-
     const bookingData = {
       tripName: item.name || item.duration,
       amount: Math.round(item.price * 100),
@@ -317,7 +338,6 @@ const RightCard = ({ item }) => {
         country: formData.country,
       },
     };
-
     try {
       console.log('Creating new PayPal order:', bookingData);
       const checkResponse = await axios.get(
@@ -335,6 +355,8 @@ const RightCard = ({ item }) => {
         setShowPayPal(false);
         setShowForm(true);
         setIsPayPalDisabled(false);
+        await clearSessionData();
+        await fetchCsrfToken();
         return;
       }
       const response = await axios.post(
@@ -355,78 +377,83 @@ const RightCard = ({ item }) => {
       setShowForm(true);
       setIsPayPalDisabled(false);
       toast.error('PayPal payment initiation failed');
+      await clearSessionData();
+      await fetchCsrfToken();
       throw err;
     }
   };
 
   const onPayPalApprove = async (data, actions) => {
-  if (!csrfToken) {
-    setError('CSRF token not loaded. Please refresh and try again.');
-    toast.error('CSRF token not loaded');
-    setIsPayPalDisabled(false);
-    return;
-  }
-
-  try {
-    console.log('Approving PayPal order:', { orderId: data.orderID, data, actions: Object.keys(actions), payer: data.payer });
-    setIsLoading(true);
-    const orderDetails = await actions.order.get();
-    console.log('PayPal order details on approve:', orderDetails);
-    if (orderDetails.status === 'COMPLETED') {
-      setError('Order already completed. Please start a new payment.');
-      toast.error('Order already completed. Starting a new payment.');
+    if (!csrfToken) {
+      setError('CSRF token not loaded. Please refresh and try again.');
+      toast.error('CSRF token not loaded');
+      setIsPayPalDisabled(false);
+      return;
+    }
+    try {
+      console.log('Approving PayPal order:', { orderId: data.orderID, data, actions: Object.keys(actions), payer: data.payer });
+      setIsLoading(true);
+      const orderDetails = await actions.order.get();
+      console.log('PayPal order details on approve:', orderDetails);
+      if (orderDetails.status === 'COMPLETED') {
+        setError('Order already completed. Please start a new payment.');
+        toast.error('Order already completed. Starting a new payment.');
+        setIsLoading(false);
+        setShowPayPal(false);
+        setShowForm(true);
+        setIsPayPalDisabled(false);
+        await clearSessionData();
+        await fetchCsrfToken();
+        return;
+      }
+      const response = await axios.post(
+        `${import.meta.env.VITE_BACKEND_URL}/api/payments/capture-paypal-payment`,
+        {
+          orderId: data.orderID,
+          tripName: item.name || item.duration,
+          customer: {
+            first_name: formData.first_name,
+            last_name: formData.last_name,
+            email: formData.email,
+            phone: formData.phone,
+            address: formData.address,
+            city: formData.city,
+            country: formData.country,
+            tripName: item.name || item.duration,
+          },
+        },
+        {
+          headers: { 'X-CSRF-Token': csrfToken },
+          withCredentials: true,
+        }
+      );
+      console.log('Backend capture response:', response.data);
+      if (!response.data.success) {
+        throw new Error(response.data.error || 'Failed to capture PayPal payment');
+      }
+      setIsLoading(false);
+      setShowPayPal(false);
+      toast.success('PayPal payment completed successfully');
+      navigate(`/success?orderId=${data.orderID}`);
+    } catch (err) {
       setIsLoading(false);
       setShowPayPal(false);
       setShowForm(true);
       setIsPayPalDisabled(false);
-      return;
-    }
-    const response = await axios.post(
-      `${import.meta.env.VITE_BACKEND_URL}/api/payments/capture-paypal-payment`,
-      {
-        orderId: data.orderID,
-        tripName: item.name || item.duration,
-        customer: {
-          first_name: formData.first_name,
-          last_name: formData.last_name,
-          email: formData.email,
-          phone: formData.phone,
-          address: formData.address,
-          city: formData.city,
-          country: formData.country,
-          tripName: item.name || item.duration,
-        },
-      },
-      {
-        headers: { 'X-CSRF-Token': csrfToken },
-        withCredentials: true,
+      if (err.response?.data?.error === 'Order already completed') {
+        setError('This payment has already been processed. Please start a new payment.');
+        toast.error('Payment already processed. Please try a new payment.');
+      } else {
+        setError('Failed to capture PayPal payment. Please try again.');
+        toast.error('PayPal payment failed: ' + err.message);
       }
-    );
-    console.log('Backend capture response:', response.data);
-    if (!response.data.success) {
-      throw new Error(response.data.error || 'Failed to capture PayPal payment');
+      console.error('PayPal capture error:', err.response?.data || err.message);
+      await clearSessionData();
+      await fetchCsrfToken();
     }
-    setIsLoading(false);
-    setShowPayPal(false);
-    toast.success('PayPal payment completed successfully');
-    navigate(`/success?orderId=${data.orderID}`);
-  } catch (err) {
-    setIsLoading(false);
-    setShowPayPal(false);
-    setShowForm(true);
-    setIsPayPalDisabled(false);
-    if (err.response?.data?.error === 'Order already completed') {
-      setError('This payment has already been processed. Please start a new payment.');
-      toast.error('Payment already processed. Please try a new payment.');
-    } else {
-      setError('Failed to capture PayPal payment. Please try again.');
-      toast.error('PayPal payment failed: ' + err.message);
-    }
-    console.error('PayPal capture error:', err.response?.data || err.message);
-  }
-};
+  };
 
-  const onPayPalCancel = () => {
+  const onPayPalCancel = async () => {
     console.log('PayPal modal cancelled');
     setIsLoading(false);
     setShowPayPal(false);
@@ -434,6 +461,8 @@ const RightCard = ({ item }) => {
     setIsPayPalDisabled(false);
     setError('PayPal payment was cancelled.');
     toast.info('PayPal payment cancelled');
+    await clearSessionData();
+    await fetchCsrfToken();
   };
 
   return (
@@ -631,7 +660,7 @@ const RightCard = ({ item }) => {
                     disabled={isLoading}
                     createOrder={createPayPalOrder}
                     onApprove={onPayPalApprove}
-                    onError={(err) => {
+                    onError={async (err) => {
                       setError('PayPal payment failed. Please try again.');
                       console.error('PayPal button error:', err);
                       setIsLoading(false);
@@ -639,6 +668,8 @@ const RightCard = ({ item }) => {
                       setShowForm(true);
                       setIsPayPalDisabled(false);
                       toast.error('PayPal payment failed');
+                      await clearSessionData();
+                      await fetchCsrfToken();
                     }}
                     onCancel={onPayPalCancel}
                   />

@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import axios from 'axios';
 
-const backendUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:4000';
+const backendUrl = import.meta.env.VITE_BACKEND_URL;
 
 const Success = () => {
   const navigate = useNavigate();
@@ -64,6 +64,44 @@ const Success = () => {
     } catch (err) {
       alert('Failed to download receipt');
     }
+  };
+
+  // Clear localhost, session storage, and cookies
+  const clearSessionData = async () => {
+    try {
+      // Clear session storage
+      sessionStorage.clear();
+
+      // Clear local storage
+      localStorage.clear();
+
+      // Clear cookies by setting them to expire in the past
+      document.cookie = 'session=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/; domain=ceejeey.me; secure; SameSite=None';
+      document.cookie = '_csrf=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/; domain=ceejeey.me; secure; SameSite=None';
+
+      // Invalidate backend session
+      await axios.post(
+        `${backendUrl}/api/logout`,
+        {},
+        { withCredentials: true }
+      );
+      console.log('Session data, storage, and cookies cleared');
+    } catch (err) {
+      console.error('Error clearing session data:', err);
+    }
+  };
+
+  // Clean up on component unmount
+  useEffect(() => {
+    return () => {
+      clearSessionData();
+    };
+  }, []);
+
+  // Override Return to Home to clear data before navigation
+  const handleReturnToHome = async () => {
+    await clearSessionData();
+    navigate('/');
   };
 
   if (loading) {
@@ -132,7 +170,7 @@ const Success = () => {
             Download Receipt
           </button>
           <button
-            onClick={() => navigate('/')}
+            onClick={handleReturnToHome}
             className="bg-green-500 text-white px-6 py-2 rounded-full hover:bg-green-600 transition text-sm font-medium"
           >
             Return to Home

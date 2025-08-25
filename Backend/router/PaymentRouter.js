@@ -19,6 +19,16 @@ const paypalClient = new paypal.core.PayPalHttpClient(
 );
 
 
+const OrderSchema = new mongoose.Schema({
+  tripName: String,
+  orderId: String,
+  status: String,
+  customer: Object,
+  amount: Number,
+  currency: String,
+  paymentType: String,
+});
+const Order = mongoose.model('Order', OrderSchema);
 
 // Middleware
 router.use(cookieParser());
@@ -446,6 +456,22 @@ router.post('/capture-paypal-payment', csrfProtection, async (req, res) => {
   } catch (error) {
     console.error('PayPal payment error:', error.message, error.response?.result);
     res.status(500).json({ success: false, error: 'Failed to process PayPal payment', details: error.message });
+  }
+});
+
+
+// New endpoint to clear order state
+router.post('/clear-order', async (req, res) => {
+  try {
+    const { tripName } = req.body;
+    if (!tripName) {
+      return res.status(400).json({ error: 'tripName is required' });
+    }
+    await Order.deleteOne({ tripName, status: { $in: ['APPROVED', 'PENDING'] } });
+    res.json({ success: true, message: 'Order state cleared' });
+  } catch (err) {
+    console.error('Error clearing order:', err);
+    res.status(500).json({ error: 'Failed to clear order' });
   }
 });
 
