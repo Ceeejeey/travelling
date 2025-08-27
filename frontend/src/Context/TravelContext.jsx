@@ -126,7 +126,7 @@ export const TravelContextProvider = ({ children }) => {
     const fetchData = async () => {
       try {
         if (addpackage.length === 0) {
-          const response = await axios.get(`${backendUrl}/api/packages`);
+          const response = await axios.get(`${backendUrl}/api/packages/pkgdetail`);
           const sanitizedPackages = response.data
             .filter(isValidPackage)
             .map((pkg) => ({ ...pkg, name: sanitizePackageName(pkg.name) }));
@@ -140,7 +140,7 @@ export const TravelContextProvider = ({ children }) => {
 
       try {
         if (addtrend.length === 0) {
-          const response = await axios.get(`${backendUrl}/api/trends`);
+          const response = await axios.get(`${backendUrl}/api/trending/trenddata`);
           setaddtrend(response.data);
           toast.success('Trends loaded successfully');
         }
@@ -151,7 +151,7 @@ export const TravelContextProvider = ({ children }) => {
 
       try {
         if (addgallery.length === 0) {
-          const response = await axios.get(`${backendUrl}/api/gallery`);
+          const response = await axios.get(`${backendUrl}/api/gallery/gallerydata`);
           setaddgallery(response.data);
           toast.success('Gallery loaded successfully');
         }

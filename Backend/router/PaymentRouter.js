@@ -2,7 +2,6 @@ import express from 'express';
 import paypal from '@paypal/checkout-server-sdk';
 import crypto from 'crypto';
 import mongoose from 'mongoose';
-import csurf from 'csurf';
 import rateLimit from 'express-rate-limit';
 import sanitizeHtml from 'sanitize-html';
 import cookieParser from 'cookie-parser';
@@ -18,23 +17,8 @@ const paypalClient = new paypal.core.PayPalHttpClient(
   )
 );
 
-
-const OrderSchema = new mongoose.Schema({
-  tripName: String,
-  orderId: String,
-  status: String,
-  customer: Object,
-  amount: Number,
-  currency: String,
-  paymentType: String,
-});
-const Order = mongoose.model('Order', OrderSchema);
-
 // Middleware
 router.use(cookieParser());
-const csrfProtection = csurf({ cookie: { httpOnly: true, secure: true, sameSite: 'none' } });
-
-// Rate limiting
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 100,
@@ -51,30 +35,96 @@ const sanitize = (input) => {
 };
 
 // CSRF token endpoint
-router.get('/csrf-token', csrfProtection, (req, res) => {
+router.get('/csrf-token', (req, res) => {
   const token = req.csrfToken();
   console.log('Generated CSRF token:', token, 'Session ID:', req.sessionID);
   res.json({ csrfToken: token });
 });
 
+// Check Session
+router.get('/check-session', (req, res) => {
+  if (req.sessionID) {
+    console.log('Session check passed for ID:', req.sessionID);
+    res.json({ valid: true, sessionId: req.sessionID });
+  } else {
+    console.log('No session found');
+    res.status(401).json({ valid: false, error: 'No session found' });
+  }
+});
+
+// Clear Order
+router.post('/clear-order', async (req, res) => {
+  try {
+    const { tripName, paymentType } = req.body;
+    if (!tripName) {
+      return res.status(400).json({ error: 'tripName is required' });
+    }
+    console.log('Clearing order state for trip:', tripName, 'Payment Type:', paymentType);
+    const payment = await Payment.findOne({ 'customer.tripName': sanitize(tripName), paymentType });
+    if (payment && paymentType === 'PayPal' && payment.status === 'APPROVED') {
+      try {
+        const voidRequest = new paypal.orders.OrdersVoidRequest(payment.order_id);
+        await paypalClient.execute(voidRequest);
+        console.log('Voided PayPal order:', payment.order_id);
+      } catch (paypalErr) {
+        console.error('PayPal void error:', paypalErr.message);
+      }
+    }
+    await Payment.deleteOne({ 'customer.tripName': sanitize(tripName), paymentType, status: { $in: ['APPROVED', 'PENDING'] } });
+    res.json({ success: true, message: 'Order state cleared' });
+  } catch (err) {
+    console.error('Error clearing order:', err);
+    res.status(500).json({ error: 'Failed to clear order' });
+  }
+});
+
 // Check order status by tripName
-router.get('/check-order-status/:tripName', csrfProtection, async (req, res) => {
+router.get('/check-order-status/:tripName', async (req, res) => {
   try {
     const { tripName } = req.params;
     console.log('Checking order status for trip:', tripName, 'Session ID:', req.sessionID);
     const payment = await Payment.findOne({ 'customer.tripName': sanitize(tripName), paymentType: 'PayPal' }).sort({ created_at: -1 });
-    if (payment) {
-      console.log('Found existing payment:', { order_id: payment.order_id, status: payment.status });
-      return res.json({ status: payment.status });
+    if (payment && (payment.status === 'APPROVED' || payment.status === 'COMPLETED')) {
+      // Check PayPal order status
+      const request = new paypal.orders.OrdersGetRequest(payment.order_id);
+      try {
+        const paypalOrder = await paypalClient.execute(request);
+        console.log('PayPal order status:', paypalOrder.result.status, 'Order ID:', payment.order_id);
+        if (paypalOrder.result.status === 'APPROVED') {
+          // Void the order
+          try {
+            const voidRequest = new paypal.orders.OrdersVoidRequest(payment.order_id);
+            await paypalClient.execute(voidRequest);
+            console.log('Voided PayPal order:', payment.order_id);
+            await Payment.deleteOne({ order_id: payment.order_id });
+            res.json({ status: 'NOT_FOUND' });
+          } catch (voidErr) {
+            console.error('Failed to void PayPal order:', payment.order_id, 'Error:', voidErr.message);
+            await Payment.deleteOne({ order_id: payment.order_id });
+            res.json({ status: 'NOT_FOUND' });
+          }
+        } else if (paypalOrder.result.status === 'COMPLETED') {
+          res.json({ status: 'COMPLETED' });
+        } else {
+          await Payment.deleteOne({ order_id: payment.order_id });
+          res.json({ status: 'NOT_FOUND' });
+        }
+      } catch (paypalErr) {
+        console.error('PayPal order check error:', paypalErr.message);
+        await Payment.deleteOne({ order_id: payment.order_id });
+        res.json({ status: 'NOT_FOUND' });
+      }
+    } else {
+      res.json({ status: 'NOT_FOUND' });
     }
-    res.json({ status: 'NOT_FOUND' });
   } catch (error) {
     console.error('Error checking order status:', error.message);
     res.status(500).json({ error: 'Failed to check order status', details: error.message });
   }
 });
 
-router.post('/initiate/payhere', csrfProtection, async (req, res) => {
+// PayHere initiation
+router.post('/initiate/payhere', async (req, res) => {
   try {
     const {
       merchant_id,
@@ -190,6 +240,7 @@ router.post('/initiate/payhere', csrfProtection, async (req, res) => {
   }
 });
 
+// PayHere notification
 router.post('/notify/payhere', async (req, res) => {
   console.log('PayHere notification received:', req.body);
   try {
@@ -310,15 +361,16 @@ router.post('/notify/payhere', async (req, res) => {
     res.status(500).json({ success: false, error: 'Failed to process notification', details: error.message });
   }
 });
-
-router.post('/create-checkout-session/paypal', csrfProtection, async (req, res) => {
+// ✅ Create PayPal order
+router.post('/create-checkout-session/paypal', async (req, res) => {
   try {
     const { tripName, amount, quantity, successUrl, cancelUrl, customer } = req.body;
     console.log('Creating PayPal order:', { tripName, amount, quantity, successUrl, cancelUrl, sessionId: req.sessionID });
+
     const request = new paypal.orders.OrdersCreateRequest();
     request.prefer('return=representation');
     request.requestBody({
-      intent: 'AUTHORIZE',
+      intent: 'AUTHORIZE', // can also be "CAPTURE" if you want immediate settlement
       purchase_units: [
         {
           amount: {
@@ -326,7 +378,7 @@ router.post('/create-checkout-session/paypal', csrfProtection, async (req, res) 
             value: (amount / 100).toFixed(2),
           },
           description: sanitize(tripName),
-          quantity: quantity,
+          quantity,
         },
       ],
       application_context: {
@@ -337,141 +389,113 @@ router.post('/create-checkout-session/paypal', csrfProtection, async (req, res) 
     });
 
     const response = await paypalClient.execute(request);
-    console.log('PayPal order created:', { orderId: response.result.id, status: response.result.status, sessionId: req.sessionID });
+    console.log('PayPal order created:', { orderId: response.result.id, status: response.result.status });
+
+    // Save initial order as CREATED
+    const sanitizedCustomer = customer ? {
+      first_name: sanitize(customer.first_name),
+      last_name: sanitize(customer.last_name),
+      email: sanitize(customer.email),
+      phone: sanitize(customer.phone),
+      address: sanitize(customer.address),
+      city: sanitize(customer.city),
+      country: sanitize(customer.country),
+      tripName: sanitize(tripName),
+    } : {};
+
+    await Payment.findOneAndUpdate(
+      { order_id: response.result.id, paymentType: 'PayPal' },
+      {
+        order_id: response.result.id,
+        payment_id: response.result.id,
+        paymentType: 'PayPal',
+        amount: parseFloat((amount / 100).toFixed(2)),
+        currency: 'USD',
+        status: response.result.status,
+        customer: sanitizedCustomer,
+      },
+      { upsert: true, new: true }
+    );
+
     res.json({ orderId: response.result.id });
   } catch (error) {
     console.error('PayPal order creation error:', error.message, error.response?.result);
     res.status(500).json({ error: 'Failed to create PayPal order', details: error.message });
   }
 });
-
-router.post('/capture-paypal-payment', csrfProtection, async (req, res) => {
+// ✅ Capture/Authorize PayPal order
+router.post('/capture-paypal-payment', async (req, res) => {
   try {
-    const { orderId, tripName, customer, amount } = req.body; // Added amount from request
+    const { orderId, tripName, customer, amount } = req.body;
     console.log('Processing PayPal payment:', { orderId, tripName, sessionId: req.sessionID });
 
-    // Check if payment already exists in MongoDB
-    const existingPayment = await Payment.findOne({ order_id: orderId, paymentType: 'PayPal' });
-    if (existingPayment) {
-      console.log('PayPal payment already processed:', { orderId, status: existingPayment.status });
-      return res.status(400).json({
-        success: false,
-        error: 'Order already processed',
-        details: 'This PayPal order has already been processed in the database.',
-      });
+    // Fetch existing payment doc
+    let existingPayment = await Payment.findOne({ order_id: orderId, paymentType: 'PayPal' });
+
+    // If already completed/approved, stop
+    if (existingPayment && ['COMPLETED', 'APPROVED'].includes(existingPayment.status)) {
+      console.log('PayPal payment already finalized:', { orderId, status: existingPayment.status });
+      return res.json({ success: true, status: existingPayment.status });
     }
 
-    // Check PayPal order status
+    // Get current PayPal order status
     const orderRequest = new paypal.orders.OrdersGetRequest(orderId);
     const orderResponse = await paypalClient.execute(orderRequest);
-    console.log('PayPal order status check:', { orderId, status: orderResponse.result.status, details: orderResponse.result });
+    console.log('PayPal order status check:', { orderId, status: orderResponse.result.status });
 
-    // Save payment if status is APPROVED or COMPLETED
-    if (orderResponse.result.status === 'APPROVED' || orderResponse.result.status === 'COMPLETED') {
-      const purchaseUnit = orderResponse.result.purchase_units[0];
-      const amountObj = purchaseUnit.amount;
-      if (!amountObj || !amountObj.currency_code || !amountObj.value) {
-        console.error('Invalid order amount:', amountObj);
-        throw new Error('Invalid order response: missing amount data');
-      }
+    let finalStatus = orderResponse.result.status;
+    let purchaseUnit = orderResponse.result.purchase_units[0];
+    let amountObj = purchaseUnit.amount;
 
-      const sanitizedCustomer = customer
-        ? {
-            first_name: sanitize(customer.first_name),
-            last_name: sanitize(customer.last_name),
-            email: sanitize(customer.email),
-            phone: sanitize(customer.phone),
-            address: sanitize(customer.address),
-            city: sanitize(customer.city),
-            country: sanitize(customer.country),
-            tripName: sanitize(tripName),
-          }
-        : {};
+    // If still CREATED → authorize it
+    if (finalStatus === 'CREATED') {
+      const authRequest = new paypal.orders.OrdersAuthorizeRequest(orderId);
+      authRequest.requestBody({});
+      const authResponse = await paypalClient.execute(authRequest);
+      console.log('PayPal order authorized:', { orderId, authStatus: authResponse.result.status });
 
-      const payment = new Payment({
-        paymentType: 'PayPal',
+      finalStatus = authResponse.result.status;
+      purchaseUnit = authResponse.result.purchase_units[0];
+      amountObj = purchaseUnit.amount;
+    }
+
+    // Update or create payment record
+    const sanitizedCustomer = customer ? {
+      first_name: sanitize(customer.first_name),
+      last_name: sanitize(customer.last_name),
+      email: sanitize(customer.email),
+      phone: sanitize(customer.phone),
+      address: sanitize(customer.address),
+      city: sanitize(customer.city),
+      country: sanitize(customer.country),
+      tripName: sanitize(tripName),
+    } : {};
+
+    const updatedPayment = await Payment.findOneAndUpdate(
+      { order_id: orderId, paymentType: 'PayPal' },
+      {
         order_id: orderId,
-        payment_id: orderResponse.result.id, // Use orderId as payment_id
-        amount: parseFloat(amountObj.value || (amount / 100).toFixed(2)), // Fallback to request amount
-        currency: amountObj.currency_code,
-        status: orderResponse.result.status,
-        customer: sanitizedCustomer,
-      });
-      await payment.save();
-      console.log('PayPal payment saved to MongoDB:', {
-        orderId,
         payment_id: orderResponse.result.id,
-        amount: payment.amount,
-        status: payment.status,
-      });
+        paymentType: 'PayPal',
+        amount: parseFloat(amountObj.value || (amount / 100).toFixed(2)),
+        currency: amountObj.currency_code,
+        status: finalStatus,
+        customer: sanitizedCustomer,
+      },
+      { upsert: true, new: true }
+    );
 
-      return res.json({ success: true, status: payment.status });
-    }
-
-    // Authorize the order (optional, for non-APPROVED cases)
-    const authRequest = new paypal.orders.OrdersAuthorizeRequest(orderId);
-    authRequest.requestBody({});
-    const authResponse = await paypalClient.execute(authRequest);
-    console.log('PayPal order authorized:', { orderId, authDetails: authResponse.result });
-
-    // Save payment after authorization
-    const purchaseUnit = authResponse.result.purchase_units[0];
-    const amountObj = purchaseUnit.amount;
-    if (!amountObj || !amountObj.currency_code || !amountObj.value) {
-      console.error('Invalid authorization amount:', amountObj);
-      throw new Error('Invalid authorization response: missing amount data');
-    }
-
-    const sanitizedCustomer = customer
-      ? {
-          first_name: sanitize(customer.first_name),
-          last_name: sanitize(customer.last_name),
-          email: sanitize(customer.email),
-          phone: sanitize(customer.phone),
-          address: sanitize(customer.address),
-          city: sanitize(customer.city),
-          country: sanitize(customer.country),
-          tripName: sanitize(tripName),
-        }
-      : {};
-
-    const payment = new Payment({
-      paymentType: 'PayPal',
-      order_id: orderId,
-      payment_id: authResponse.result.id, // Use orderId as payment_id
-      amount: parseFloat(amountObj.value || (amount / 100).toFixed(2)), // Fallback to request amount
-      currency: amountObj.currency_code,
-      status: authResponse.result.status,
-      customer: sanitizedCustomer,
-    });
-    await payment.save();
     console.log('PayPal payment saved to MongoDB:', {
       orderId,
-      payment_id: authResponse.result.id,
-      amount: payment.amount,
-      status: payment.status,
+      payment_id: updatedPayment.payment_id,
+      amount: updatedPayment.amount,
+      status: updatedPayment.status,
     });
 
-    res.json({ success: true, status: payment.status });
+    res.json({ success: true, status: updatedPayment.status });
   } catch (error) {
     console.error('PayPal payment error:', error.message, error.response?.result);
     res.status(500).json({ success: false, error: 'Failed to process PayPal payment', details: error.message });
-  }
-});
-
-
-// New endpoint to clear order state
-router.post('/clear-order', async (req, res) => {
-  try {
-    const { tripName } = req.body;
-    if (!tripName) {
-      return res.status(400).json({ error: 'tripName is required' });
-    }
-    await Order.deleteOne({ tripName, status: { $in: ['APPROVED', 'PENDING'] } });
-    res.json({ success: true, message: 'Order state cleared' });
-  } catch (err) {
-    console.error('Error clearing order:', err);
-    res.status(500).json({ error: 'Failed to clear order' });
   }
 });
 

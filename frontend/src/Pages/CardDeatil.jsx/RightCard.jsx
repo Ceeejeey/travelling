@@ -47,6 +47,7 @@ const RightCard = ({ item }) => {
   const [showForm, setShowForm] = useState(true);
   const [csrfToken, setCsrfToken] = useState('');
   const hasFetchedCsrf = useRef(false);
+  const retryCount = useRef(0);
 
   // Clear all storage and cookies
   const clearSessionData = async () => {
@@ -58,18 +59,18 @@ const RightCard = ({ item }) => {
       hasFetchedCsrf.current = false;
 
       // Clear cookies
-      const domain = window.location.hostname === 'localhost' ? 'localhost' : 'ceejeey.me';
-      document.cookie = `session=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/; domain=${domain}; secure=${window.location.protocol === 'https:'}; SameSite=Lax`;
-      document.cookie = `_csrf=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/; domain=${domain}; secure=${window.location.protocol === 'https:'}; SameSite=Lax`;
+      const domain = window.location.hostname === 'localhost' ? undefined : 'ceejeey.me';
+      document.cookie = `session=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/;${domain ? ` domain=${domain};` : ''} secure=${window.location.protocol === 'http:'}; SameSite=none`;
+      document.cookie = `_csrf=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/;${domain ? ` domain=${domain};` : ''} secure=${window.location.protocol === 'http:'}; SameSite=none`;
 
       // Clear backend order and session
       await axios.post(
         `${import.meta.env.VITE_BACKEND_URL}/api/payments/clear-order`,
-        { tripName: item?.name || item?.duration },
+        { tripName: item?.name || item?.duration, paymentType: 'paypal' },
         { withCredentials: true }
       );
       await axios.post(
-        `${import.meta.env.VITE_BACKEND_URL}/api/logout`,
+        `${import.meta.env.VITE_BACKEND_URL}/api/payments/logout`,
         {},
         { withCredentials: true }
       );
@@ -79,11 +80,11 @@ const RightCard = ({ item }) => {
     }
   };
 
-  // Fetch CSRF token
+  // Fetch CSRF token once with retry on session error
   const fetchCsrfToken = useCallback(async () => {
     if (hasFetchedCsrf.current) {
-      console.log('CSRF fetch already attempted, clearing and retrying');
-      await clearSessionData();
+      console.log('CSRF token already fetched, skipping...');
+      return;
     }
     hasFetchedCsrf.current = true;
     try {
@@ -96,11 +97,39 @@ const RightCard = ({ item }) => {
       console.log('CSRF token fetched:', token);
     } catch (err) {
       console.error('Failed to fetch CSRF token:', err.message);
-      setError('Failed to initialize payment system. Please try again.');
-      toast.error('Payment system initialization failed');
-      hasFetchedCsrf.current = false;
+      if ((err.response?.status === 500 && err.response?.data?.error === 'Session not initialized') && retryCount.current < 2) {
+        console.log('Retrying CSRF token fetch due to session initialization failure, attempt:', retryCount.current + 1);
+        retryCount.current += 1;
+        hasFetchedCsrf.current = false; // Allow retry
+        await clearSessionData();
+        await fetchCsrfToken(); // Retry
+      } else {
+        setError('Failed to initialize payment system. Please try again.');
+        toast.error('Payment system initialization failed');
+        hasFetchedCsrf.current = false;
+      }
     }
   }, []);
+
+  // Validate session cookies
+  const validateSession = async () => {
+    try {
+      const response = await axios.get(`${import.meta.env.VITE_BACKEND_URL}/api/payments/check-session`, {
+        withCredentials: true,
+      });
+      console.log('Session validated:', response.data);
+      return response.data.valid;
+    } catch (err) {
+      console.error('Session validation failed:', err.message);
+      if (err.response?.status === 404) {
+        console.warn('Session check endpoint not found, proceeding without validation');
+        return true;
+      }
+      await clearSessionData();
+      await fetchCsrfToken();
+      return false;
+    }
+  };
 
   // Log component mount and fetch CSRF token
   useEffect(() => {
@@ -108,7 +137,6 @@ const RightCard = ({ item }) => {
     fetchCsrfToken();
     return () => {
       console.log('RightCard unmounted for item:', item?.name || item?.duration);
-      clearSessionData();
     };
   }, [item, fetchCsrfToken]);
 
@@ -136,6 +164,7 @@ const RightCard = ({ item }) => {
           setError('PayHere payment was cancelled.');
           toast.info('PayHere payment cancelled');
           await clearSessionData();
+          await fetchCsrfToken();
         };
         window.payhere.onError = async (error) => {
           console.error('PayHere error:', error);
@@ -145,6 +174,7 @@ const RightCard = ({ item }) => {
           setError(`PayHere payment failed: ${error}`);
           toast.error(`PayHere payment failed: ${error}`);
           await clearSessionData();
+          await fetchCsrfToken();
         };
       } else {
         console.error('PayHere SDK not initialized');
@@ -287,18 +317,22 @@ const RightCard = ({ item }) => {
       console.log('Modal triggered, waiting for user interaction');
     } catch (err) {
       setError('Failed to initiate PayHere payment. Please try again.');
-      console.error('PayHere payment error:', err.message);
+      console.error('PayHere payment error:', err.response?.data || err.message);
       setIsLoading(false);
       setShowForm(true);
-      toast.error('PayHere payment initiation failed: ' + err.message);
+      toast.error('PayHere payment initiation failed: ' + err.response?.data?.error || err.message);
       await clearSessionData();
       await fetchCsrfToken();
     }
   };
 
   const handlePayPalClick = async () => {
-    await clearSessionData();
-    await fetchCsrfToken();
+    const isSessionValid = await validateSession();
+    if (!isSessionValid) {
+      setError('Session invalid. Please refresh and try again.');
+      toast.error('Session invalid. Please try again.');
+      return;
+    }
     setShowPayPal(true);
     setError(null);
     setIsPayPalDisabled(true);
@@ -340,6 +374,16 @@ const RightCard = ({ item }) => {
     };
     try {
       console.log('Creating new PayPal order:', bookingData);
+      // Clear order state before checking status
+      await axios.post(
+        `${import.meta.env.VITE_BACKEND_URL}/api/payments/clear-order`,
+        { tripName: bookingData.tripName, paymentType: 'paypal' },
+        {
+          headers: { 'X-CSRF-Token': csrfToken },
+          withCredentials: true,
+        }
+      );
+      console.log('Order state cleared before status check');
       const checkResponse = await axios.get(
         `${import.meta.env.VITE_BACKEND_URL}/api/payments/check-order-status/${bookingData.tripName}`,
         {
@@ -368,8 +412,16 @@ const RightCard = ({ item }) => {
         }
       );
       console.log('PayPal order created:', response.data.orderId);
+      retryCount.current = 0;
       return response.data.orderId;
     } catch (err) {
+      if (String(err).includes('global_session_not_found') && retryCount.current < 2) {
+        console.log('Retrying PayPal order creation due to global_session_not_found, attempt:', retryCount.current + 1);
+        retryCount.current += 1;
+        await clearSessionData();
+        await fetchCsrfToken();
+        return createPayPalOrder(); // Retry
+      }
       setError('Failed to initiate PayPal payment. Please try again.');
       console.error('PayPal order creation error:', err.response?.data || err.message);
       setIsLoading(false);
@@ -379,6 +431,7 @@ const RightCard = ({ item }) => {
       toast.error('PayPal payment initiation failed');
       await clearSessionData();
       await fetchCsrfToken();
+      retryCount.current = 0;
       throw err;
     }
   };
